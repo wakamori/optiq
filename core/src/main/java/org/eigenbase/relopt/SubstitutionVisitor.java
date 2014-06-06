@@ -36,12 +36,12 @@ import org.eigenbase.util.mapping.Mappings;
 import net.hydromatic.linq4j.Ord;
 
 import net.hydromatic.optiq.prepare.OptiqPrepareImpl;
+import net.hydromatic.optiq.runtime.Spaces;
 import net.hydromatic.optiq.util.BitSets;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
+import com.google.common.collect.*;
 
 /**
  * Substitutes part of a tree of relational expressions with another tree.
@@ -113,14 +113,14 @@ public class SubstitutionVisitor {
     this.cluster = target_.getCluster();
     this.query = toMutable(query_);
     this.target = toMutable(target_);
-    final Set<MutableRel> parents = new HashSet<MutableRel>();
+    final Set<MutableRel> parents = Sets.newIdentityHashSet();
     final List<MutableRel> allNodes = new ArrayList<MutableRel>();
     final MutableRelVisitor visitor =
         new MutableRelVisitor() {
-          public void visit(MutableRel node, int ordinal, MutableRel parent) {
-            parents.add(parent);
+          public void visit(MutableRel node) {
+            parents.add(node.parent);
             allNodes.add(node);
-            super.visit(node, ordinal, parent);
+            super.visit(node);
           }
         };
     visitor.go(target);
@@ -132,6 +132,7 @@ public class SubstitutionVisitor {
     targetLeaves = ImmutableList.copyOf(allNodes);
 
     allNodes.clear();
+    parents.clear();
     visitor.go(query);
     allNodes.removeAll(parents);
     queryLeaves = ImmutableList.copyOf(allNodes);
@@ -150,11 +151,21 @@ public class SubstitutionVisitor {
       return MutableProject.of(input, project.getProjects(),
           project.getRowType().getFieldNames());
     }
+    if (rel instanceof FilterRelBase) {
+      final FilterRelBase filter = (FilterRelBase) rel;
+      final MutableRel input = toMutable(filter.getChild());
+      return MutableFilter.of(input, filter.getCondition());
+    }
+    if (rel instanceof AggregateRelBase) {
+      final AggregateRelBase aggregate = (AggregateRelBase) rel;
+      final MutableRel input = toMutable(aggregate.getChild());
+      return MutableAggregate.of(input, aggregate.getGroupSet(),
+          aggregate.getAggCallList());
+    }
     throw new RuntimeException("cannot translate " + rel + " to MutableRel");
   }
 
   void register(MutableRel result, MutableRel query) {
-    throw new UnsupportedOperationException(); // TODO:
   }
 
   /**
@@ -409,7 +420,7 @@ public class SubstitutionVisitor {
 
   public RelNode go(RelNode replacement_) {
     MutableRel replacement = toMutable(replacement_);
-    assert MutableRelUtil.equalType(
+    assert MutableRels.equalType(
         "target", target, "replacement", replacement, true);
     replacementMap.put(target, replacement);
     final UnifyResult unifyResult = matchRecurse(target);
@@ -421,23 +432,32 @@ public class SubstitutionVisitor {
     if (DEBUG) {
       System.out.println(
           "Convert: query:\n"
-              + query
+              + query.deep()
               + "\nunify.query:\n"
-              + unifyResult.call.query
+              + unifyResult.call.query.deep()
               + "\nunify.result:\n"
-              + unifyResult.result
+              + unifyResult.result.deep()
               + "\nunify.target:\n"
-              + unifyResult.call.target
+              + unifyResult.call.target.deep()
               + "\nnode0:\n"
-              + node0
+              + node0.deep()
               + "\nnode:\n"
-              + node);
+              + node.deep());
     }
     return fromMutable(node);
   }
 
-  private RelNode fromMutable(MutableRel node) {
-    throw new UnsupportedOperationException(); // TODO:
+  private static RelNode fromMutable(MutableRel node) {
+    switch (node.type) {
+    case PROJECT:
+      MutableProject project = (MutableProject) node;
+      return new ProjectRel(node.cluster,
+          node.cluster.traitSetOf(RelCollationImpl.EMPTY),
+          fromMutable(project.input),
+          project.projects, project.rowType, ProjectRelBase.Flags.NONE);
+    default:
+      throw new AssertionError(node);
+    }
   }
 
   private UnifyResult matchRecurse(MutableRel target) {
@@ -452,7 +472,6 @@ public class SubstitutionVisitor {
       queryParent = unifyResult.call.query.replaceInParent(unifyResult.result);
     }
 
-    assert queryParent != null;
     if (targetInputs.isEmpty()) {
       for (MutableRel queryLeaf : queryLeaves) {
         for (UnifyRule rule : applicableRules(queryLeaf, target)) {
@@ -468,9 +487,9 @@ public class SubstitutionVisitor {
                      + queryParent
                      : "")
                   + "\nTarget:\n"
-                  + target.toString()
+                  + target.deep()
                   + "\nResult:\n"
-                  + x.result.toString()
+                  + x.result.deep()
                   + "\n");
             }
             return x;
@@ -478,6 +497,7 @@ public class SubstitutionVisitor {
         }
       }
     } else {
+      assert queryParent != null;
       for (UnifyRule rule : applicableRules(queryParent, target)) {
         final UnifyResult x = apply(rule, queryParent, target);
         if (x != null) {
@@ -485,15 +505,15 @@ public class SubstitutionVisitor {
             System.out.println(
                 "Rule: " + rule
                 + "\nQuery:\n"
-                + queryParent.toString()
+                + queryParent.deep()
                 + (x.call.query != queryParent
                    ? "\nQuery (original):\n"
                    + queryParent.toString()
                    : "")
                 + "\nTarget:\n"
-                + target.toString()
+                + target.deep()
                 + "\nResult:\n"
-                + x.result.toString()
+                + x.result.deep()
                 + "\n");
           }
           return x;
@@ -597,12 +617,12 @@ public class SubstitutionVisitor {
     }
 
     UnifyResult result(MutableRel result) {
-      assert MutableRelUtil.contains(result, target);
-      assert MutableRelUtil.equalType("result", result, "query", query, true);
+      assert MutableRels.contains(result, target);
+      assert MutableRels.equalType("result", result, "query", query, true);
       // TODO: equiv(result, query);
       MutableRel replace = replacementMap.get(target);
       if (replace != null) {
-        result = MutableRelUtil.replace(result, target, replace);
+        result = MutableRels.replace(result, target, replace);
       }
       register(result, query);
       return new UnifyResult(this, result);
@@ -633,12 +653,8 @@ public class SubstitutionVisitor {
 
     UnifyResult(UnifyRuleCall call, MutableRel result) {
       this.call = call;
-      assert MutableRelUtil.equalType(
-          "query",
-          call.query,
-          "result",
-          result,
-          true);
+      assert MutableRels.equalType(
+          "query", call.query, "result", result, true);
       this.result = result;
     }
   }
@@ -674,7 +690,7 @@ public class SubstitutionVisitor {
     }
 
     public UnifyResult apply(UnifyRuleCall call) {
-      if (call.query == call.target) {
+      if (call.query.equals(call.target)) {
         return call.result(call.query);
       }
       return null;
@@ -703,7 +719,7 @@ public class SubstitutionVisitor {
       final MutableProject newProject =
           MutableProject.of(
               query.getRowType(), target, newProjects);
-      final MutableRel newProject2 = MutableRelUtil.strip(newProject);
+      final MutableRel newProject2 = MutableRels.strip(newProject);
       return call.result(newProject2);
     }
   }
@@ -903,7 +919,7 @@ public class SubstitutionVisitor {
         }
         projects.add(groupCount + i);
       }
-      result = MutableRelUtil.createProject(target, projects);
+      result = MutableRels.createProject(target, projects);
     } else {
       // Target is coarser level of aggregation. Generate an aggregate.
       final BitSet groupSet = new BitSet();
@@ -933,7 +949,7 @@ public class SubstitutionVisitor {
       }
       result = MutableAggregate.of(target, groupSet, aggregateCalls);
     }
-    return MutableRelUtil.createCastRel(result, query.getRowType(), true);
+    return MutableRels.createCastRel(result, query.getRowType(), true);
   }
 
   /** Implementation of {@link UnifyRule} that matches a {@link AggregateRel} on
@@ -1013,20 +1029,13 @@ public class SubstitutionVisitor {
   private static class MutableRelVisitor {
     private MutableRel root;
 
-    public void visit(
-        MutableRel node,
-        int ordinal,
-        MutableRel parent) {
+    public void visit(MutableRel node) {
       node.childrenAccept(this);
-    }
-
-    public void replaceRoot(MutableRel node) {
-      this.root = node;
     }
 
     public MutableRel go(MutableRel p) {
       this.root = p;
-      visit(p, 0, null);
+      visit(p);
       return root;
     }
   }
@@ -1061,13 +1070,13 @@ public class SubstitutionVisitor {
       return rowType;
     }
 
-    public abstract void setInput(int ordinalInParent, MutableRel rel);
+    public abstract void setInput(int ordinalInParent, MutableRel input);
 
     public abstract List<MutableRel> getInputs();
 
     public abstract void childrenAccept(MutableRelVisitor visitor);
 
-    /** Replace this {@code MutableRel} in its parent with another node at the
+    /** Replaces this {@code MutableRel} in its parent with another node at the
      * same position.
      *
      * <p>Before the method, {@code child} must be an orphan (have null parent)
@@ -1076,12 +1085,31 @@ public class SubstitutionVisitor {
      * @return The parent
      */
     public MutableRel replaceInParent(MutableRel child) {
-      assert child.parent == null;
       final MutableRel parent = this.parent;
-      parent.setInput(ordinalInParent, child);
-      child.parent = parent;
-      this.parent = null;
+      if (this != child) {
+/*
+        if (child.parent != null) {
+          child.parent.setInput(child.ordinalInParent, null);
+          child.parent = null;
+        }
+*/
+        if (parent != null) {
+          parent.setInput(ordinalInParent, child);
+          this.parent = null;
+          this.ordinalInParent = 0;
+        }
+      }
       return parent;
+    }
+
+    public abstract StringBuilder digest(StringBuilder buf);
+
+    public final String deep() {
+      return new MutableRelDumper().apply(this);
+    }
+
+    @Override public String toString() {
+      throw new UnsupportedOperationException(); // call deep or digest
     }
   }
 
@@ -1095,7 +1123,7 @@ public class SubstitutionVisitor {
       this.rel = rel;
     }
 
-    public void setInput(int ordinalInParent, MutableRel rel) {
+    public void setInput(int ordinalInParent, MutableRel input) {
       throw new IllegalArgumentException();
     }
 
@@ -1116,13 +1144,19 @@ public class SubstitutionVisitor {
         MutableRel input) {
       super(input.cluster, rowType, type);
       this.input = input;
+      input.parent = this;
+      input.ordinalInParent = 0;
     }
 
-    public void setInput(int ordinalInParent, MutableRel rel) {
+    public void setInput(int ordinalInParent, MutableRel input) {
       if (ordinalInParent >= 1) {
         throw new IllegalArgumentException();
       }
-      input = rel;
+      this.input = input;
+      if (input != null) {
+        input.parent = this;
+        input.ordinalInParent = 0;
+      }
     }
 
     public List<MutableRel> getInputs() {
@@ -1130,7 +1164,7 @@ public class SubstitutionVisitor {
     }
 
     public void childrenAccept(MutableRelVisitor visitor) {
-      visitor.visit(input, 0, this);
+      visitor.visit(input);
     }
 
     public MutableRel getChild() {
@@ -1157,6 +1191,11 @@ public class SubstitutionVisitor {
     @Override public int hashCode() {
       return rel.hashCode();
     }
+
+    @Override public StringBuilder digest(StringBuilder buf) {
+      return buf.append("Scan(table: ")
+          .append(rel.getTable().getQualifiedName()).append(")");
+    }
   }
 
   /** Mutable equivalent of {@link ValuesRelBase}. */
@@ -1177,6 +1216,11 @@ public class SubstitutionVisitor {
 
     @Override public int hashCode() {
       return rel.hashCode();
+    }
+
+    @Override public StringBuilder digest(StringBuilder buf) {
+      return buf.append("Values(tuples: ")
+          .append(((ValuesRelBase) rel).getTuples()).append(")");
     }
   }
 
@@ -1219,13 +1263,17 @@ public class SubstitutionVisitor {
       return Util.hashV(input, projects);
     }
 
+    @Override public StringBuilder digest(StringBuilder buf) {
+      return buf.append("Project(projects: ").append(projects).append(")");
+    }
+
     public List<RexNode> getProjects() {
       return projects;
     }
 
     public Mappings.TargetMapping getMapping() {
-      return ProjectRelBase.getMapping(input.getRowType().getFieldCount(),
-          projects);
+      return ProjectRelBase.getMapping(
+          input.getRowType().getFieldCount(), projects);
     }
   }
 
@@ -1251,6 +1299,10 @@ public class SubstitutionVisitor {
 
     @Override public int hashCode() {
       return Util.hashV(input, condition);
+    }
+
+    @Override public StringBuilder digest(StringBuilder buf) {
+      return buf.append("Filter(condition: ").append(condition).append(")");
     }
 
     public RexNode getCondition() {
@@ -1288,6 +1340,11 @@ public class SubstitutionVisitor {
 
     @Override public int hashCode() {
       return Util.hashV(input, groupSet, aggCalls);
+    }
+
+    @Override public StringBuilder digest(StringBuilder buf) {
+      return buf.append("Aggregate(groupSet: ").append(groupSet)
+          .append(", calls: ").append(aggCalls).append(")");
     }
 
     public BitSet getGroupSet() {
@@ -1330,12 +1387,41 @@ public class SubstitutionVisitor {
     @Override public int hashCode() {
       return Util.hashV(input, collation, offset, fetch);
     }
+
+    @Override public StringBuilder digest(StringBuilder buf) {
+      buf.append("Sort(collation: ").append(collation);
+      if (offset != null) {
+        buf.append(", offset: ").append(offset);
+      }
+      if (fetch != null) {
+        buf.append(", fetch: ").append(fetch);
+      }
+      return buf.append(")");
+    }
   }
 
-  /** Utilities for {@link MutableRel}. */
-  private static class MutableRelUtil {
-    public static boolean contains(MutableRel rel0, MutableRel rel1) {
-      throw new UnsupportedOperationException(); // TODO:
+  /** Utilities for dealing with {@link MutableRel}s. */
+  private static class MutableRels {
+    public static boolean contains(MutableRel ancestor,
+        final MutableRel target) {
+      if (ancestor.equals(target)) {
+        // Short-cut common case.
+        return true;
+      }
+      try {
+        new MutableRelVisitor() {
+          @Override public void visit(MutableRel node) {
+            if (node.equals(target)) {
+              throw Util.FoundOne.NULL;
+            }
+            super.visit(node);
+          }
+          // CHECKSTYLE: IGNORE 1
+        }.go(ancestor);
+        return false;
+      } catch (Util.FoundOne e) {
+        return true;
+      }
     }
 
     /** Returns whether two relational expressions have the same row-type. */
@@ -1411,6 +1497,30 @@ public class SubstitutionVisitor {
       final List<String> fieldNames =
           rename ? castRowType.getFieldNames() : rowType.getFieldNames();
       return MutableProject.of(rel, castExps, fieldNames);
+    }
+  }
+
+  /** Visitor that prints an indented tree of {@link MutableRel}s. */
+  private static class MutableRelDumper extends MutableRelVisitor {
+    private final StringBuilder buf = new StringBuilder();
+    private int level;
+
+    @Override public void visit(MutableRel node) {
+      Spaces.append(buf, level * 2);
+      if (node == null) {
+        buf.append("null");
+      } else {
+        node.digest(buf);
+        buf.append("\n");
+        ++level;
+        super.visit(node);
+        --level;
+      }
+    }
+
+    public String apply(MutableRel rel) {
+      go(rel);
+      return buf.toString();
     }
   }
 }
