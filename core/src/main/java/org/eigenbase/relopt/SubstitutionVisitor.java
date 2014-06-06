@@ -41,6 +41,7 @@ import net.hydromatic.optiq.util.BitSets;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
+import com.google.common.base.Objects;
 import com.google.common.collect.*;
 
 /**
@@ -1379,8 +1380,8 @@ public class SubstitutionVisitor {
       return obj == this
           || obj instanceof MutableSort
           && collation.equals(((MutableSort) obj).collation)
-          && Objects.equals(offset, ((MutableSort) obj).offset)
-          && Objects.equals(fetch, ((MutableSort) obj).fetch)
+          && Objects.equal(offset, ((MutableSort) obj).offset)
+          && Objects.equal(fetch, ((MutableSort) obj).fetch)
           && input.equals(((MutableSort) obj).input);
     }
 
