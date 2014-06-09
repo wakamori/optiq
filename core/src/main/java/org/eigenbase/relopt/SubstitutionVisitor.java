@@ -110,6 +110,9 @@ public class SubstitutionVisitor {
   final Map<MutableRel, MutableRel> replacementMap =
       new HashMap<MutableRel, MutableRel>();
 
+  final Multimap<MutableRel, MutableRel> equivalents =
+      LinkedHashMultimap.create();
+
   public SubstitutionVisitor(RelNode target_, RelNode query_) {
     this.cluster = target_.getCluster();
     this.query = toMutable(query_);
@@ -139,7 +142,7 @@ public class SubstitutionVisitor {
     queryLeaves = ImmutableList.copyOf(allNodes);
   }
 
-  private MutableRel toMutable(RelNode rel) {
+  private static MutableRel toMutable(RelNode rel) {
     if (rel instanceof TableAccessRelBase) {
       return MutableScan.of((TableAccessRelBase) rel);
     }
@@ -419,7 +422,7 @@ public class SubstitutionVisitor {
             e2));
   }
 
-  public RelNode go(RelNode replacement_) {
+  public RelNode go0(RelNode replacement_) {
     MutableRel replacement = toMutable(replacement_);
     assert MutableRels.equalType(
         "target", target, "replacement", replacement, true);
@@ -448,16 +451,89 @@ public class SubstitutionVisitor {
     return fromMutable(node);
   }
 
+  public RelNode go(RelNode replacement_) {
+    MutableRel replacement = toMutable(replacement_);
+    assert MutableRels.equalType(
+        "target", target, "replacement", replacement, true);
+    final List<MutableRel> queryDescendants = MutableRels.descendants(query);
+    final List<MutableRel> targetDescendants = MutableRels.descendants(target);
+
+    // Populate "equivalents" with (q, t) for each query descendant q and
+    // target descendant t that are equal.
+    final Map<MutableRel, MutableRel> map = Maps.newHashMap();
+    for (MutableRel queryDescendant : queryDescendants) {
+      map.put(queryDescendant, queryDescendant);
+    }
+    for (MutableRel targetDescendant : targetDescendants) {
+      MutableRel queryDescendant = map.get(targetDescendant);
+      if (queryDescendant != null) {
+        equivalents.put(queryDescendant, targetDescendant);
+      }
+    }
+    map.clear();
+
+    for (;;) {
+      int count = 0;
+      for (MutableRel queryDescendant : queryDescendants) {
+        for (MutableRel targetDescendant : targetDescendants) {
+          for (UnifyRule rule
+              : applicableRules(queryDescendant, targetDescendant)) {
+            final UnifyResult result =
+                rule.apply(
+                    new UnifyRuleCall(rule, queryDescendant, targetDescendant));
+            if (result != null) {
+              ++count;
+              if (targetDescendant == target) {
+                return fromMutable(result.result);
+              }
+              queryDescendant.replaceInParent(result.result);
+            }
+          }
+        }
+      }
+      if (count == 0) {
+        return null;
+      }
+    }
+  }
+
+  private static List<RelNode> fromMutables(List<MutableRel> nodes) {
+    return Lists.transform(nodes,
+        new Function<MutableRel, RelNode>() {
+          public RelNode apply(MutableRel mutableRel) {
+            return fromMutable(mutableRel);
+          }
+        });
+  }
+
   private static RelNode fromMutable(MutableRel node) {
     switch (node.type) {
+    case SCAN:
+    case VALUES:
+      return ((MutableLeafRel) node).rel;
     case PROJECT:
-      MutableProject project = (MutableProject) node;
+      final MutableProject project = (MutableProject) node;
       return new ProjectRel(node.cluster,
           node.cluster.traitSetOf(RelCollationImpl.EMPTY),
           fromMutable(project.input),
-          project.projects, project.rowType, ProjectRelBase.Flags.NONE);
+          project.projects, project.rowType, ProjectRelBase.Flags.BOXED);
+    case FILTER:
+      final MutableFilter filter = (MutableFilter) node;
+      return new FilterRel(node.cluster, fromMutable(filter.input),
+          filter.condition);
+    case AGGREGATE:
+      final MutableAggregate aggregate = (MutableAggregate) node;
+      return new AggregateRel(node.cluster, fromMutable(aggregate.input),
+          aggregate.groupSet, aggregate.aggCalls);
+    case SORT:
+      final MutableSort sort = (MutableSort) node;
+      return new SortRel(node.cluster, node.cluster.traitSetOf(sort.collation),
+          fromMutable(sort.input), sort.collation, sort.offset, sort.fetch);
+    case UNION:
+      final MutableUnion union = (MutableUnion) node;
+      return new UnionRel(union.cluster, fromMutables(union.inputs), union.all);
     default:
-      throw new AssertionError(node);
+      throw new AssertionError(node.deep());
     }
   }
 
@@ -1401,6 +1477,62 @@ public class SubstitutionVisitor {
     }
   }
 
+  /** Base class for set-operations. */
+  private abstract static class MutableSetOp extends MutableRel {
+    protected final List<MutableRel> inputs;
+
+    private MutableSetOp(RelOptCluster cluster, RelDataType rowType,
+        MutableRelType type, List<MutableRel> inputs) {
+      super(cluster, rowType, type);
+      this.inputs = inputs;
+    }
+
+    @Override public void setInput(int ordinalInParent, MutableRel input) {
+      inputs.set(ordinalInParent, input);
+    }
+
+    @Override public List<MutableRel> getInputs() {
+      return inputs;
+    }
+
+    @Override public void childrenAccept(MutableRelVisitor visitor) {
+      for (MutableRel input : inputs) {
+        visitor.visit(input);
+      }
+    }
+  }
+
+  /** Mutable equivalent of {@link UnionRel}. */
+  private static class MutableUnion extends MutableSetOp {
+    public boolean all;
+
+    private MutableUnion(RelOptCluster cluster, RelDataType rowType,
+        List<MutableRel> inputs, boolean all) {
+      super(cluster, rowType, MutableRelType.UNION, inputs);
+      this.all = all;
+    }
+
+    static MutableUnion of(List<MutableRel> inputs, boolean all) {
+      assert inputs.size() >= 2;
+      final MutableRel input0 = inputs.get(0);
+      return new MutableUnion(input0.cluster, input0.rowType, inputs, all);
+    }
+
+    @Override public boolean equals(Object obj) {
+      return obj == this
+          || obj instanceof MutableUnion
+          && inputs.equals(((MutableUnion) obj).getInputs());
+    }
+
+    @Override public int hashCode() {
+      return Util.hashV(type, inputs);
+    }
+
+    @Override public StringBuilder digest(StringBuilder buf) {
+      return buf.append("Union");
+    }
+  }
+
   /** Utilities for dealing with {@link MutableRel}s. */
   private static class MutableRels {
     public static boolean contains(MutableRel ancestor,
@@ -1425,6 +1557,20 @@ public class SubstitutionVisitor {
       }
     }
 
+    private static List<MutableRel> descendants(MutableRel query) {
+      final List<MutableRel> list = new ArrayList<MutableRel>();
+      descendantsRecurse(list, query);
+      return list;
+    }
+
+    private static void descendantsRecurse(List<MutableRel> list,
+        MutableRel rel) {
+      list.add(rel);
+      for (MutableRel input : rel.getInputs()) {
+        descendantsRecurse(list, input);
+      }
+    }
+
     /** Returns whether two relational expressions have the same row-type. */
     public static boolean equalType(String desc0, MutableRel rel0, String desc1,
         MutableRel rel1, boolean fail) {
@@ -1432,9 +1578,38 @@ public class SubstitutionVisitor {
           desc1, rel1.getRowType(), fail);
     }
 
-    public static MutableRel replace(MutableRel result, MutableRel target,
+    /** Within a relational expression {@code query}, replaces occurrences of
+     * {@code find} with {@code replace}.
+     *
+     * <p>Assumes relational expressions (and their descendants) are not null.
+     * Does not handle cycles. */
+    public static MutableRel replace(MutableRel query, MutableRel find,
         MutableRel replace) {
-      throw new UnsupportedOperationException(); // TODO:
+      if (find.equals(replace)) {
+        // Short-cut common case.
+        return query;
+      }
+      assert equalType("find", find, "replace", replace, true);
+      if (query.equals(find)) {
+        // Short-cut another common case.
+        return replace;
+      }
+      replaceRecurse(query, find, replace);
+      return query;
+    }
+
+    /** Helper for {@link #replace}. */
+    private static void replaceRecurse(MutableRel query, MutableRel find,
+        MutableRel replace) {
+      final List<MutableRel> inputs = query.getInputs();
+      for (int i = 0; i < inputs.size(); i++) {
+        MutableRel input = inputs.get(i);
+        if (input.equals(find)) {
+          query.setInput(i, replace);
+        } else {
+          replaceRecurse(input, find, replace);
+        }
+      }
     }
 
     /** Based on {@link RemoveTrivialProjectRule#strip(ProjectRel)}. */
@@ -1522,6 +1697,85 @@ public class SubstitutionVisitor {
     public String apply(MutableRel rel) {
       go(rel);
       return buf.toString();
+    }
+  }
+
+  /** Operand to a {@link UnifyRule}. */
+  private abstract static class Operand {
+    protected final Class<? extends MutableRel> clazz;
+
+    protected Operand(Class<? extends MutableRel> clazz) {
+      this.clazz = clazz;
+    }
+
+    abstract boolean matches(MutableRel[] slots, MutableRel rel);
+  }
+
+  /** Operand to a {@link UnifyRule} that matches a relational expression of a
+   * given type. It has zero or more child operands. */
+  private static class InternalOperand extends Operand {
+    private final List<Operand> inputs;
+
+    InternalOperand(Class<? extends MutableRel> clazz, List<Operand> inputs) {
+      super(clazz);
+      this.inputs = inputs;
+    }
+
+    @Override boolean matches(MutableRel[] slots, MutableRel rel) {
+      return clazz.isInstance(rel)
+          && allMatch(slots, inputs, rel.getInputs());
+    }
+
+    private static boolean allMatch(MutableRel[] slots, List<Operand> operands,
+        List<MutableRel> rels) {
+      if (operands.size() != rels.size()) {
+        return false;
+      }
+      for (Pair<Operand, MutableRel> pair : Pair.zip(operands, rels)) {
+        if (!pair.left.matches(slots, pair.right)) {
+          return false;
+        }
+      }
+      return true;
+    }
+  }
+
+  /** Operand that assigns a particular relational expression to a variable.
+   *
+   * <p>It is applied to a descendant of the query, writes the operand into the
+   * slots array, and always matches.
+   * There is a corresponding operand of type {@link TargetOperand} that checks
+   * whether its relational expression, a descendant of the target, is
+   * equivalent to this {@code QueryOperand}'s relational expression.
+   */
+  private static class QueryOperand extends Operand {
+    private final int ordinal;
+
+    protected QueryOperand(int ordinal) {
+      super(MutableRel.class);
+      this.ordinal = ordinal;
+    }
+
+    @Override boolean matches(MutableRel[] slots, MutableRel rel) {
+      slots[ordinal] = rel;
+      return true;
+    }
+  }
+
+  /** Operand that checks that a relational expression matches the corresponding
+   * relational expression that was passed to a {@link QueryOperand}. */
+  private static class TargetOperand extends Operand {
+    private final int ordinal;
+
+    protected TargetOperand(int ordinal) {
+      super(MutableRel.class);
+      this.ordinal = ordinal;
+    }
+
+    @Override boolean matches(MutableRel[] slots, MutableRel rel) {
+      assert slots[ordinal] != null
+          : "QueryOperand should have been called first";
+      return slots[ordinal].equals(rel);
     }
   }
 }
