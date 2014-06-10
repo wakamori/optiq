@@ -443,6 +443,7 @@ public class SubstitutionVisitor {
   }
 
   public RelNode go0(RelNode replacement_) {
+    assert false; // not called
     MutableRel replacement = toMutable(replacement_);
     assert MutableRels.equalType(
         "target", target, "replacement", replacement, true);
@@ -563,6 +564,7 @@ public class SubstitutionVisitor {
   }
 
   private UnifyResult matchRecurse(MutableRel target) {
+    assert false; // not called
     final List<MutableRel> targetInputs = target.getInputs();
     MutableRel queryParent = null;
 
@@ -679,10 +681,10 @@ public class SubstitutionVisitor {
    * engine to fire only a few rules in a given context.</p>
    */
   private abstract static class UnifyRule {
-    private final Operand queryOperand;
-    private final Operand targetOperand;
+    protected final Operand queryOperand;
+    protected final Operand targetOperand;
     /** Workspace while rule is being matched. Careful, re-entrant! */
-    private final MutableRel[] slots;
+    protected final MutableRel[] slots;
 
     protected UnifyRule(int slotCount, Operand queryOperand,
         Operand targetOperand) {
@@ -747,12 +749,11 @@ public class SubstitutionVisitor {
     UnifyResult result(MutableRel result) {
       assert MutableRels.contains(result, target);
       assert MutableRels.equalType("result", result, "query", query, true);
-      // TODO: equiv(result, query);
       MutableRel replace = replacementMap.get(target);
       if (replace != null) {
+        assert false; // replacementMap is always empty
         // result =
         MutableRels.replace(result, target, replace);
-        throw new AssertionError("replace is now void; replacementMap empty?");
       }
       register(result, query);
       return new UnifyResult(this, result);
@@ -762,6 +763,8 @@ public class SubstitutionVisitor {
      * Creates a {@link UnifyRuleCall} based on the parent of {@code query}.
      */
     public UnifyRuleCall create(MutableRel query) {
+      // not called - except from ProjectToFilterUnifyRule, currently disabled
+      assert false;
       return new UnifyRuleCall(rule, query, target);
     }
 
@@ -783,8 +786,7 @@ public class SubstitutionVisitor {
 
     UnifyResult(UnifyRuleCall call, MutableRel result) {
       this.call = call;
-      assert MutableRels.equalType(
-          "query", call.query, "result", result, true);
+      assert MutableRels.equalType("query", call.query, "result", result, true);
       this.result = result;
     }
   }
@@ -794,6 +796,20 @@ public class SubstitutionVisitor {
     public AbstractUnifyRule(Operand queryOperand, Operand targetOperand,
         int slotCount) {
       super(slotCount, queryOperand, targetOperand);
+      //noinspection AssertWithSideEffects
+      assert isValid();
+    }
+
+    protected boolean isValid() {
+      final SlotCounter slotCounter = new SlotCounter();
+      slotCounter.visit(queryOperand);
+      assert slotCounter.queryCount == slots.length;
+      assert slotCounter.targetCount == 0;
+      slotCounter.queryCount = 0;
+      slotCounter.visit(targetOperand);
+      assert slotCounter.queryCount == 0;
+      assert slotCounter.targetCount == slots.length;
+      return true;
     }
 
     /** Creates an operand with given inputs. */
@@ -1863,6 +1879,23 @@ public class SubstitutionVisitor {
       assert slots[ordinal] != null
           : "QueryOperand should have been called first";
       return slots[ordinal].equals(rel);
+    }
+  }
+
+  private static class SlotCounter {
+    int queryCount;
+    int targetCount;
+
+    void visit(Operand operand) {
+      if (operand instanceof QueryOperand) {
+        ++queryCount;
+      } else if (operand instanceof TargetOperand) {
+        ++targetCount;
+      } else {
+        for (Operand input : ((InternalOperand) operand).inputs) {
+          visit(input);
+        }
+      }
     }
   }
 }
