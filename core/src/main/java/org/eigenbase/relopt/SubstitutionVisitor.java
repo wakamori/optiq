@@ -21,6 +21,7 @@ import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import com.google.common.base.Equivalence;
 import org.eigenbase.rel.*;
 import org.eigenbase.rel.rules.RemoveTrivialProjectRule;
 import org.eigenbase.reltype.*;
@@ -80,6 +81,25 @@ public class SubstitutionVisitor {
 
   private static final Logger LOGGER = EigenbaseTrace.getPlannerTracer();
 
+  /** Equivalence that compares objects by their {@link Object#toString()}
+   * method. */
+  private static final Equivalence<Object> STRING_EQUIVALENCE =
+      new Equivalence<Object>() {
+        @Override protected boolean doEquivalent(Object o, Object o2) {
+          return o.toString().equals(o2.toString());
+        }
+
+        @Override protected int doHash(Object o) {
+          return o.toString().hashCode();
+        }
+      };
+
+  /** Equivalence that compares {@link Lists}s by the
+   * {@link Object#toString()} of their elements. */
+  @SuppressWarnings("unchecked")
+  private static final Equivalence<List<?>> PAIRWISE_STRING_EQUIVALENCE =
+      (Equivalence) STRING_EQUIVALENCE.pairwise();
+
   private static final List<UnifyRule> RULES =
       ImmutableList.<UnifyRule>of(
           TrivialRule.INSTANCE,
@@ -94,7 +114,7 @@ public class SubstitutionVisitor {
       new HashMap<Pair<Class, Class>, List<UnifyRule>>();
 
   private final RelOptCluster cluster;
-  private final MutableRel query;
+  private final Holder query;
   private final MutableRel target;
 
   /**
@@ -115,7 +135,7 @@ public class SubstitutionVisitor {
 
   public SubstitutionVisitor(RelNode target_, RelNode query_) {
     this.cluster = target_.getCluster();
-    this.query = toMutable(query_);
+    this.query = Holder.of(toMutable(query_));
     this.target = toMutable(target_);
     final Set<MutableRel> parents = Sets.newIdentityHashSet();
     final List<MutableRel> allNodes = new ArrayList<MutableRel>();
@@ -474,19 +494,24 @@ public class SubstitutionVisitor {
 
     for (;;) {
       int count = 0;
+    outer:
       for (MutableRel queryDescendant : queryDescendants) {
         for (MutableRel targetDescendant : targetDescendants) {
           for (UnifyRule rule
               : applicableRules(queryDescendant, targetDescendant)) {
-            final UnifyResult result =
-                rule.apply(
-                    new UnifyRuleCall(rule, queryDescendant, targetDescendant));
-            if (result != null) {
-              ++count;
-              if (targetDescendant == target) {
-                return fromMutable(result.result);
+            UnifyRuleCall call =
+                rule.match(this, queryDescendant, targetDescendant);
+            if (call != null) {
+              final UnifyResult result = rule.apply(call);
+              if (result != null) {
+                ++count;
+                queryDescendant.replaceInParent(result.result);
+                if (targetDescendant == target) {
+                  MutableRels.replace(query, target, replacement);
+                  return fromMutable(query.input);
+                }
+                break outer;
               }
-              queryDescendant.replaceInParent(result.result);
             }
           }
         }
@@ -626,7 +651,7 @@ public class SubstitutionVisitor {
           ImmutableList.builder();
       for (UnifyRule rule : RULES) {
         //noinspection unchecked
-        if (rule.mightMatch(queryClass, targetClass)) {
+        if (mightMatch(rule, queryClass, targetClass)) {
           builder.add(rule);
         }
       }
@@ -634,6 +659,12 @@ public class SubstitutionVisitor {
       RULE_MAP.put(key, list);
     }
     return list;
+  }
+
+  private static boolean mightMatch(UnifyRule rule,
+      Class queryClass, Class targetClass) {
+    return rule.queryOperand.clazz.isAssignableFrom(queryClass)
+        && rule.targetOperand.clazz.isAssignableFrom(targetClass);
   }
 
   /** Exception thrown to exit a matcher. Not really an error. */
@@ -647,7 +678,19 @@ public class SubstitutionVisitor {
    * <p>The rule declares the query and target types; this allows the
    * engine to fire only a few rules in a given context.</p>
    */
-  private interface UnifyRule {
+  private abstract static class UnifyRule {
+    private final Operand queryOperand;
+    private final Operand targetOperand;
+    /** Workspace while rule is being matched. Careful, re-entrant! */
+    private final MutableRel[] slots;
+
+    protected UnifyRule(int slotCount, Operand queryOperand,
+        Operand targetOperand) {
+      this.queryOperand = queryOperand;
+      this.targetOperand = targetOperand;
+      this.slots = new MutableRel[slotCount];
+    }
+
     /**
      * <p>Applies this rule to a particular node in a query. The goal is
      * to convert {@code query} into {@code target}. Before the rule is
@@ -674,9 +717,17 @@ public class SubstitutionVisitor {
      *
      * @param call Input parameters
      */
-    UnifyResult apply(UnifyRuleCall call);
+    abstract UnifyResult apply(UnifyRuleCall call);
 
-    boolean mightMatch(Class queryClass, Class targetClass);
+    UnifyRuleCall match(SubstitutionVisitor visitor, MutableRel query,
+        MutableRel target) {
+      if (queryOperand.matches(slots, query)) {
+        if (targetOperand.matches(slots, target)) {
+          return visitor.new UnifyRuleCall(this, query, target);
+        }
+      }
+      return null;
+    }
   }
 
   /**
@@ -699,7 +750,9 @@ public class SubstitutionVisitor {
       // TODO: equiv(result, query);
       MutableRel replace = replacementMap.get(target);
       if (replace != null) {
-        result = MutableRels.replace(result, target, replace);
+        // result =
+        MutableRels.replace(result, target, replace);
+        throw new AssertionError("replace is now void; replacementMap empty?");
       }
       register(result, query);
       return new UnifyResult(this, result);
@@ -737,33 +790,42 @@ public class SubstitutionVisitor {
   }
 
   /** Abstract base class for implementing {@link UnifyRule}. */
-  private abstract static class AbstractUnifyRule implements UnifyRule {
-    private final Class<? extends MutableRel> queryClass;
-    private final Class<? extends MutableRel> targetClass;
-
-    public AbstractUnifyRule(Class<? extends MutableRel> queryClass,
-        Class<? extends MutableRel> targetClass) {
-      this.queryClass = queryClass;
-      this.targetClass = targetClass;
+  private abstract static class AbstractUnifyRule extends UnifyRule {
+    public AbstractUnifyRule(Operand queryOperand, Operand targetOperand,
+        int slotCount) {
+      super(slotCount, queryOperand, targetOperand);
     }
 
-    public boolean mightMatch(Class queryClass, Class targetClass) {
-      return this.queryClass.isAssignableFrom(queryClass)
-          && this.targetClass.isAssignableFrom(targetClass);
+    /** Creates an operand with given inputs. */
+    static Operand operand(Class<? extends MutableRel> clazz,
+        Operand... inputOperands) {
+      return new InternalOperand(clazz, ImmutableList.copyOf(inputOperands));
+    }
+
+    /** Creates an operand that matches a relational expression in the query. */
+    static Operand query(int ordinal) {
+      return new QueryOperand(ordinal);
+    }
+
+    /** Creates an operand that matches a relational expression in the
+     * target. */
+    static Operand target(int ordinal) {
+      return new TargetOperand(ordinal);
     }
   }
 
   /** Implementation of {@link UnifyRule} that matches if the query is already
-   * equal to the target (using {@code ==}).
+   * equal to the target.
    *
-   * <p>Matches scans to the same table, because these will be canonized to
-   * the same {@link org.eigenbase.rel.TableAccessRel} instance.</p>
+   * <p>Matches scans to the same table, because these will be
+   * {@link MutableScan}s with the same
+   * {@link org.eigenbase.rel.TableAccessRel} instance.</p>
    */
   private static class TrivialRule extends AbstractUnifyRule {
     private static final TrivialRule INSTANCE = new TrivialRule();
 
     private TrivialRule() {
-      super(MutableRel.class, MutableRel.class);
+      super(operand(MutableRel.class), operand(MutableRel.class), 0);
     }
 
     public UnifyResult apply(UnifyRuleCall call) {
@@ -780,7 +842,8 @@ public class SubstitutionVisitor {
         new ProjectToProjectUnifyRule();
 
     private ProjectToProjectUnifyRule() {
-      super(MutableProject.class, MutableProject.class);
+      super(operand(MutableProject.class, query(0)),
+          operand(MutableProject.class, target(0)), 1);
     }
 
     public UnifyResult apply(UnifyRuleCall call) {
@@ -808,7 +871,8 @@ public class SubstitutionVisitor {
         new FilterToProjectUnifyRule();
 
     private FilterToProjectUnifyRule() {
-      super(MutableFilter.class, MutableProject.class);
+      super(operand(MutableFilter.class, query(0)),
+          operand(MutableProject.class, target(0)), 1);
     }
 
     public UnifyResult apply(UnifyRuleCall call) {
@@ -857,13 +921,15 @@ public class SubstitutionVisitor {
     }
   }
 
-  /** Implementation of {@link UnifyRule} that matches a {@link MutableFilter}. */
+  /** Implementation of {@link UnifyRule} that matches a
+   * {@link MutableFilter}. */
   private static class FilterToFilterUnifyRule extends AbstractUnifyRule {
     public static final FilterToFilterUnifyRule INSTANCE =
         new FilterToFilterUnifyRule();
 
     private FilterToFilterUnifyRule() {
-      super(MutableFilter.class, MutableFilter.class);
+      super(operand(MutableFilter.class, query(0)),
+          operand(MutableFilter.class, target(0)), 1);
     }
 
     public UnifyResult apply(UnifyRuleCall call) {
@@ -905,7 +971,8 @@ public class SubstitutionVisitor {
         new ProjectToFilterUnifyRule();
 
     private ProjectToFilterUnifyRule() {
-      super(MutableProject.class, MutableFilter.class);
+      super(operand(MutableProject.class, query(0)),
+          operand(MutableFilter.class, target(0)), 1);
     }
 
     public UnifyResult apply(UnifyRuleCall call) {
@@ -932,7 +999,8 @@ public class SubstitutionVisitor {
         new AggregateToAggregateUnifyRule();
 
     private AggregateToAggregateUnifyRule() {
-      super(MutableAggregate.class, MutableAggregate.class);
+      super(operand(MutableAggregate.class, query(0)),
+          operand(MutableAggregate.class, target(0)), 1);
     }
 
     public UnifyResult apply(UnifyRuleCall call) {
@@ -1029,15 +1097,19 @@ public class SubstitutionVisitor {
     return MutableRels.createCastRel(result, query.getRowType(), true);
   }
 
-  /** Implementation of {@link UnifyRule} that matches a {@link AggregateRel} on
-   * a {@link ProjectRel} to an {@link AggregateRel} target. */
+  /** Implementation of {@link UnifyRule} that matches a
+   * {@link MutableAggregate} on
+   * a {@link MutableProject} query to an {@link MutableAggregate} target. */
   private static class AggregateOnProjectToAggregateUnifyRule
       extends AbstractUnifyRule {
     public static final AggregateOnProjectToAggregateUnifyRule INSTANCE =
         new AggregateOnProjectToAggregateUnifyRule();
 
     private AggregateOnProjectToAggregateUnifyRule() {
-      super(MutableAggregate.class, MutableAggregate.class);
+      super(
+          operand(MutableAggregate.class,
+              operand(MutableAggregate.class, query(0))),
+          operand(MutableAggregate.class, target(0)), 1);
     }
 
     public UnifyResult apply(UnifyRuleCall call) {
@@ -1099,6 +1171,7 @@ public class SubstitutionVisitor {
     SORT,
     UNION,
     JOIN,
+    HOLDER,
     VALUES
   }
 
@@ -1185,12 +1258,28 @@ public class SubstitutionVisitor {
       return new MutableRelDumper().apply(this);
     }
 
-    @Override public String toString() {
-      throw new UnsupportedOperationException(); // call deep or digest
+    @Override public final String toString() {
+      return deep();
     }
   }
 
-  /** Abstract base class for implementations of {@link MutableRel} that have
+  /** Implementation of {@link MutableRel} whose only purpose is to have a
+   * child. Used as the root of a tree. */
+  private static class Holder extends MutableSingleRel {
+    private Holder(MutableRelType type, RelDataType rowType, MutableRel input) {
+      super(type, rowType, input);
+    }
+
+    static Holder of(MutableRel input) {
+      return new Holder(MutableRelType.HOLDER, input.rowType, input);
+    }
+
+    @Override public StringBuilder digest(StringBuilder buf) {
+      return buf.append("Holder");
+    }
+  }
+
+   /** Abstract base class for implementations of {@link MutableRel} that have
    * no inputs. */
   private abstract static class MutableLeafRel extends MutableRel {
     protected final RelNode rel;
@@ -1332,12 +1421,14 @@ public class SubstitutionVisitor {
     @Override public boolean equals(Object obj) {
       return obj == this
           || obj instanceof MutableProject
-          && projects.equals(((MutableProject) obj).projects)
+          && PAIRWISE_STRING_EQUIVALENCE.equivalent(
+              projects, ((MutableProject) obj).projects)
           && input.equals(((MutableProject) obj).input);
     }
 
     @Override public int hashCode() {
-      return Util.hashV(input, projects);
+      return Objects.hashCode(input,
+          PAIRWISE_STRING_EQUIVALENCE.hash(projects));
     }
 
     @Override public StringBuilder digest(StringBuilder buf) {
@@ -1370,12 +1461,13 @@ public class SubstitutionVisitor {
     @Override public boolean equals(Object obj) {
       return obj == this
           || obj instanceof MutableFilter
-          && condition.equals(((MutableFilter) obj).condition)
+          && condition.toString().equals(
+              ((MutableFilter) obj).condition.toString())
           && input.equals(((MutableFilter) obj).input);
     }
 
     @Override public int hashCode() {
-      return Util.hashV(input, condition);
+      return Util.hashV(input, condition.toString());
     }
 
     @Override public StringBuilder digest(StringBuilder buf) {
@@ -1583,19 +1675,14 @@ public class SubstitutionVisitor {
      *
      * <p>Assumes relational expressions (and their descendants) are not null.
      * Does not handle cycles. */
-    public static MutableRel replace(MutableRel query, MutableRel find,
+    public static void replace(MutableRel query, MutableRel find,
         MutableRel replace) {
       if (find.equals(replace)) {
         // Short-cut common case.
-        return query;
+        return;
       }
       assert equalType("find", find, "replace", replace, true);
-      if (query.equals(find)) {
-        // Short-cut another common case.
-        return replace;
-      }
       replaceRecurse(query, find, replace);
-      return query;
     }
 
     /** Helper for {@link #replace}. */

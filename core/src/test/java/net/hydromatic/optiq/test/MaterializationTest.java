@@ -180,10 +180,16 @@ public class MaterializationTest {
         "select \"name\", \"empid\" + 1 from \"emps\" where \"deptno\" - 10 = 0");
   }
 
+  @Test public void testFilterQueryOnProjectView6() {
+    checkNoMaterialize(
+        "select \"deptno\" - 10 as \"x\", \"empid\"  from \"emps\"",
+        "select \"name\" from \"emps\" where \"deptno\" - 10 = 0",
+        JdbcTest.HR_MODEL);
+  }
+
   /** As {@link #testFilterQueryOnProjectView3()} but also contains an
    * expression column. */
-  @Ignore("fix project expr on filter")
-  @Test public void testFilterQueryOnProjectView6() {
+  @Test public void testFilterQueryOnProjectView7() {
     checkNoMaterialize(
         "select \"deptno\" - 10 as \"x\", \"empid\" + 1, \"name\" from \"emps\"",
         "select \"name\", \"empid\" + 2 from \"emps\" where \"deptno\" - 10 = 0",
