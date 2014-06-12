@@ -4116,9 +4116,8 @@ public class SqlToRelConverter {
             // leftKeysForIn, rightKeysForIn(the original subquery
             // select list), nullIndicator The first two lists
             // contain the same number of fields
-            for (
-                int i = 0;
-                i < ((rex.getType().getFieldCount() - 1) / 2);
+            for (int i = 0;
+                 i < ((rex.getType().getFieldCount() - 1) / 2);
                 i++) {
               rexNode =
                   rexBuilder.makeCall(
@@ -4273,9 +4272,7 @@ public class SqlToRelConverter {
      * @param count Number of new expressions inserted
      */
     public void adjustSubqueries(final int index, final int count) {
-      for (
-          Map.Entry<SqlNode, RexNode> entry
-          : mapSubqueryToExpr.entrySet()) {
+      for (Map.Entry<SqlNode, RexNode> entry : mapSubqueryToExpr.entrySet()) {
         RexNode expr = entry.getValue();
         RexShuttle shuttle =
             new RexShuttle() {
