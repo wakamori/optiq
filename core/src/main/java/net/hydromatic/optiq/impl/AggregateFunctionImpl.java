@@ -26,7 +26,6 @@ import org.eigenbase.util.Util;
 import com.google.common.collect.ImmutableList;
 
 import java.lang.reflect.Method;
-import java.util.Arrays;
 import java.util.List;
 
 import static org.eigenbase.util.Static.*;
@@ -97,7 +96,7 @@ public class AggregateFunctionImpl implements AggregateFunction {
 
       // V is remaining args of add by definition
       final List<Class<?>> addParamTypes =
-          Arrays.asList(addMethod.getParameterTypes());
+          ImmutableList.copyOf(addMethod.getParameterTypes());
       if (addParamTypes.isEmpty() || addParamTypes.get(0) != accumulatorType) {
         throw RESOURCE.firstParameterOfAdd(clazz.getName()).ex();
       }
@@ -118,7 +117,7 @@ public class AggregateFunctionImpl implements AggregateFunction {
 
       if (initAddMethod != null) {
         final List<Class<?>> initAddParams =
-            Arrays.asList(initAddMethod.getParameterTypes());
+            ImmutableList.copyOf(initAddMethod.getParameterTypes());
         if (!initAddParams.equals(valueTypes)) {
           throw RESOURCE.initAddWrongParamTypes(clazz.getName()).ex();
         }

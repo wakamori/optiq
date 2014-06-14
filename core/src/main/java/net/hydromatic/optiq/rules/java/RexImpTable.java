@@ -1007,7 +1007,7 @@ public class RexImpTable {
     /** Types that can be arguments to comparison operators such as
      * {@code <}. */
     private static final List<Primitive> COMP_OP_TYPES =
-        Arrays.asList(
+        ImmutableList.of(
             Primitive.BYTE,
             Primitive.CHAR,
             Primitive.SHORT,
@@ -1017,7 +1017,7 @@ public class RexImpTable {
             Primitive.DOUBLE);
 
     private static final List<SqlBinaryOperator> COMPARISON_OPERATORS =
-        Arrays.asList(
+        ImmutableList.of(
             SqlStdOperatorTable.LESS_THAN,
             SqlStdOperatorTable.LESS_THAN_OR_EQUAL,
             SqlStdOperatorTable.GREATER_THAN,

@@ -826,7 +826,7 @@ public class JavaRules {
                   // TODO: generics
                   //   Collections.singletonList(inputRowType),
                   NO_EXPRS,
-                  Arrays.<MemberDeclaration>asList(
+                  ImmutableList.<MemberDeclaration>of(
                       Expressions.methodDecl(
                           Modifier.PUBLIC,
                           enumeratorType,
@@ -882,7 +882,7 @@ public class JavaRules {
       extends AggregateRelBase
       implements EnumerableRel {
     private static final List<Aggregation> SUPPORTED_AGGREGATIONS =
-        Arrays.<Aggregation>asList(
+        ImmutableList.<Aggregation>of(
             SqlStdOperatorTable.COUNT,
             SqlStdOperatorTable.MIN,
             SqlStdOperatorTable.MAX,
@@ -2551,7 +2551,7 @@ public class JavaRules {
 
       builder.add(
           Expressions.for_(
-              Arrays.asList(win.jDecl, win.orderStartDecl),
+              ImmutableList.of(win.jDecl, win.orderStartDecl),
               Expressions.lessThanOrEqual(win.jX, win.endX),
               Expressions.preIncrementAssign(win.jX),
               builder5.toBlock()));
