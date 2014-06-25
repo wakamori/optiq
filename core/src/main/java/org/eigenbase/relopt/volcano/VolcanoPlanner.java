@@ -296,7 +296,7 @@ public class VolcanoPlanner extends AbstractRelOptPlanner {
     hepPlanner.setRoot(root);
     root = hepPlanner.findBestExp();
 
-    return new OriginalSubstitutionVisitor(target, root)
+    return new SubstitutionVisitor(target, root)
         .go(materialization.tableRel);
   }
 

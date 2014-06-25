@@ -21,7 +21,6 @@ import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import com.google.common.base.Equivalence;
 import org.eigenbase.rel.*;
 import org.eigenbase.rel.rules.RemoveTrivialProjectRule;
 import org.eigenbase.reltype.*;
@@ -41,8 +40,10 @@ import net.hydromatic.optiq.runtime.Spaces;
 import net.hydromatic.optiq.util.BitSets;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Equivalence;
 import com.google.common.base.Function;
 import com.google.common.base.Objects;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.*;
 
 /**
@@ -102,7 +103,7 @@ public class SubstitutionVisitor {
 
   private static final List<UnifyRule> RULES =
       ImmutableList.<UnifyRule>of(
-          TrivialRule.INSTANCE,
+//          TrivialRule.INSTANCE,
           ProjectToProjectUnifyRule.INSTANCE,
           FilterToProjectUnifyRule.INSTANCE,
 //          ProjectToFilterUnifyRule.INSTANCE,
@@ -132,6 +133,11 @@ public class SubstitutionVisitor {
 
   final Multimap<MutableRel, MutableRel> equivalents =
       LinkedHashMultimap.create();
+
+  /** Workspace while rule is being matched.
+   * Careful, re-entrant!
+   * Assumes no rule needs more than 2 slots. */
+  protected final MutableRel[] slots = new MutableRel[2];
 
   public SubstitutionVisitor(RelNode target_, RelNode query_) {
     this.cluster = target_.getCluster();
@@ -488,6 +494,7 @@ public class SubstitutionVisitor {
     for (MutableRel targetDescendant : targetDescendants) {
       MutableRel queryDescendant = map.get(targetDescendant);
       if (queryDescendant != null) {
+        assert queryDescendant.rowType.equals(targetDescendant.rowType);
         equivalents.put(queryDescendant, targetDescendant);
       }
     }
@@ -507,6 +514,15 @@ public class SubstitutionVisitor {
               if (result != null) {
                 ++count;
                 queryDescendant.replaceInParent(result.result);
+                // Replace previous equivalents with new equivalents, higher up
+                // the tree.
+                for (int i = 0; i < rule.slotCount; i++) {
+                  equivalents.removeAll(slots[i]);
+                }
+                assert result.result.rowType.equals(queryDescendant.rowType)
+                    : Pair.of(result.result, queryDescendant);
+                equivalents.put(queryDescendant, result.result); // TODO: need?
+                equivalents.put(result.result, queryDescendant);
                 if (targetDescendant == target) {
                   MutableRels.replace(query, target, replacement);
                   return fromMutable(query.input);
@@ -638,7 +654,7 @@ public class SubstitutionVisitor {
 
   private UnifyResult apply(UnifyRule rule, MutableRel query,
       MutableRel target) {
-    final UnifyRuleCall call = new UnifyRuleCall(rule, query, target);
+    final UnifyRuleCall call = new UnifyRuleCall(rule, query, target, null);
     return rule.apply(call);
   }
 
@@ -681,16 +697,15 @@ public class SubstitutionVisitor {
    * engine to fire only a few rules in a given context.</p>
    */
   private abstract static class UnifyRule {
+    protected final int slotCount;
     protected final Operand queryOperand;
     protected final Operand targetOperand;
-    /** Workspace while rule is being matched. Careful, re-entrant! */
-    protected final MutableRel[] slots;
 
     protected UnifyRule(int slotCount, Operand queryOperand,
         Operand targetOperand) {
+      this.slotCount = slotCount;
       this.queryOperand = queryOperand;
       this.targetOperand = targetOperand;
-      this.slots = new MutableRel[slotCount];
     }
 
     /**
@@ -723,12 +738,25 @@ public class SubstitutionVisitor {
 
     UnifyRuleCall match(SubstitutionVisitor visitor, MutableRel query,
         MutableRel target) {
-      if (queryOperand.matches(slots, query)) {
-        if (targetOperand.matches(slots, target)) {
-          return visitor.new UnifyRuleCall(this, query, target);
+      if (queryOperand.matches(visitor, query)) {
+        if (targetOperand.matches(visitor, target)) {
+          return visitor.new UnifyRuleCall(this, query, target,
+              copy(visitor.slots, slotCount));
         }
       }
       return null;
+    }
+
+    private <E> ImmutableList<E> copy(E[] slots, int slotCount) {
+      // Optimize if there are 0 or 1 slots.
+      switch (slotCount) {
+      case 0:
+        return ImmutableList.of();
+      case 1:
+        return ImmutableList.of(slots[0]);
+      default:
+        return ImmutableList.copyOf(slots).subList(0, slotCount);
+      }
     }
   }
 
@@ -739,11 +767,14 @@ public class SubstitutionVisitor {
     final UnifyRule rule;
     final MutableRel query;
     final MutableRel target;
+    final ImmutableList<MutableRel> slots;
 
-    public UnifyRuleCall(UnifyRule rule, MutableRel query, MutableRel target) {
-      this.rule = rule;
-      this.query = query;
-      this.target = target;
+    public UnifyRuleCall(UnifyRule rule, MutableRel query, MutableRel target,
+        ImmutableList<MutableRel> slots) {
+      this.rule = Preconditions.checkNotNull(rule);
+      this.query = Preconditions.checkNotNull(query);
+      this.target = Preconditions.checkNotNull(target);
+      this.slots = Preconditions.checkNotNull(slots);
     }
 
     UnifyResult result(MutableRel result) {
@@ -765,7 +796,7 @@ public class SubstitutionVisitor {
     public UnifyRuleCall create(MutableRel query) {
       // not called - except from ProjectToFilterUnifyRule, currently disabled
       assert false;
-      return new UnifyRuleCall(rule, query, target);
+      return new UnifyRuleCall(rule, query, target, null);
     }
 
     public RelOptCluster getCluster() {
@@ -803,12 +834,12 @@ public class SubstitutionVisitor {
     protected boolean isValid() {
       final SlotCounter slotCounter = new SlotCounter();
       slotCounter.visit(queryOperand);
-      assert slotCounter.queryCount == slots.length;
+      assert slotCounter.queryCount == slotCount;
       assert slotCounter.targetCount == 0;
       slotCounter.queryCount = 0;
       slotCounter.visit(targetOperand);
       assert slotCounter.queryCount == 0;
-      assert slotCounter.targetCount == slots.length;
+      assert slotCounter.targetCount == slotCount;
       return true;
     }
 
@@ -816,6 +847,11 @@ public class SubstitutionVisitor {
     static Operand operand(Class<? extends MutableRel> clazz,
         Operand... inputOperands) {
       return new InternalOperand(clazz, ImmutableList.copyOf(inputOperands));
+    }
+
+    /** Creates an operand that doesn't check inputs. */
+    static Operand any(Class<? extends MutableRel> clazz) {
+      return new AnyOperand(clazz);
     }
 
     /** Creates an operand that matches a relational expression in the query. */
@@ -841,7 +877,7 @@ public class SubstitutionVisitor {
     private static final TrivialRule INSTANCE = new TrivialRule();
 
     private TrivialRule() {
-      super(operand(MutableRel.class), operand(MutableRel.class), 0);
+      super(any(MutableRel.class), any(MutableRel.class), 0);
     }
 
     public UnifyResult apply(UnifyRuleCall call) {
@@ -929,8 +965,7 @@ public class SubstitutionVisitor {
       for (Ord<RexNode> expr : Ord.zip(project.getProjects())) {
         if (expr.e instanceof RexInputRef) {
           final int target = ((RexInputRef) expr.e).getIndex();
-          exprList.set(expr.i,
-              rexBuilder.makeInputRef(input.rowType, target));
+          exprList.set(expr.i, RexInputRef.of(target, input.rowType));
         }
       }
       return MutableProject.of(model.rowType, input, exprList);
@@ -1023,9 +1058,6 @@ public class SubstitutionVisitor {
       final MutableAggregate query = (MutableAggregate) call.query;
       final MutableAggregate target = (MutableAggregate) call.target;
       assert query != target;
-      if (query.getChild() != target.getChild()) {
-        return null;
-      }
       // in.query can be rewritten in terms of in.target if its groupSet is
       // a subset, and its aggCalls are a superset. For example:
       //   query: SELECT x, COUNT(b) FROM t GROUP BY x
@@ -1115,7 +1147,11 @@ public class SubstitutionVisitor {
 
   /** Implementation of {@link UnifyRule} that matches a
    * {@link MutableAggregate} on
-   * a {@link MutableProject} query to an {@link MutableAggregate} target. */
+   * a {@link MutableProject} query to an {@link MutableAggregate} target.
+   *
+   * <p>The rule is necessary when we unify query=Aggregate(x) with
+   * target=Aggregate(x, y). Query will tend to have an extra Project(x) on its
+   * input, which this rule knows is safe to ignore.</p> */
   private static class AggregateOnProjectToAggregateUnifyRule
       extends AbstractUnifyRule {
     public static final AggregateOnProjectToAggregateUnifyRule INSTANCE =
@@ -1124,7 +1160,7 @@ public class SubstitutionVisitor {
     private AggregateOnProjectToAggregateUnifyRule() {
       super(
           operand(MutableAggregate.class,
-              operand(MutableAggregate.class, query(0))),
+              operand(MutableProject.class, query(0))),
           operand(MutableAggregate.class, target(0)), 1);
     }
 
@@ -1811,7 +1847,7 @@ public class SubstitutionVisitor {
       this.clazz = clazz;
     }
 
-    abstract boolean matches(MutableRel[] slots, MutableRel rel);
+    abstract boolean matches(SubstitutionVisitor visitor, MutableRel rel);
   }
 
   /** Operand to a {@link UnifyRule} that matches a relational expression of a
@@ -1824,22 +1860,34 @@ public class SubstitutionVisitor {
       this.inputs = inputs;
     }
 
-    @Override boolean matches(MutableRel[] slots, MutableRel rel) {
+    @Override boolean matches(SubstitutionVisitor visitor, MutableRel rel) {
       return clazz.isInstance(rel)
-          && allMatch(slots, inputs, rel.getInputs());
+          && allMatch(visitor, inputs, rel.getInputs());
     }
 
-    private static boolean allMatch(MutableRel[] slots, List<Operand> operands,
-        List<MutableRel> rels) {
+    private static boolean allMatch(SubstitutionVisitor visitor,
+        List<Operand> operands, List<MutableRel> rels) {
       if (operands.size() != rels.size()) {
         return false;
       }
       for (Pair<Operand, MutableRel> pair : Pair.zip(operands, rels)) {
-        if (!pair.left.matches(slots, pair.right)) {
+        if (!pair.left.matches(visitor, pair.right)) {
           return false;
         }
       }
       return true;
+    }
+  }
+
+  /** Operand to a {@link UnifyRule} that matches a relational expression of a
+   * given type. */
+  private static class AnyOperand extends Operand {
+    AnyOperand(Class<? extends MutableRel> clazz) {
+      super(clazz);
+    }
+
+    @Override boolean matches(SubstitutionVisitor visitor, MutableRel rel) {
+      return clazz.isInstance(rel);
     }
   }
 
@@ -1859,8 +1907,8 @@ public class SubstitutionVisitor {
       this.ordinal = ordinal;
     }
 
-    @Override boolean matches(MutableRel[] slots, MutableRel rel) {
-      slots[ordinal] = rel;
+    @Override boolean matches(SubstitutionVisitor visitor, MutableRel rel) {
+      visitor.slots[ordinal] = rel;
       return true;
     }
   }
@@ -1875,13 +1923,15 @@ public class SubstitutionVisitor {
       this.ordinal = ordinal;
     }
 
-    @Override boolean matches(MutableRel[] slots, MutableRel rel) {
-      assert slots[ordinal] != null
-          : "QueryOperand should have been called first";
-      return slots[ordinal].equals(rel);
+    @Override boolean matches(SubstitutionVisitor visitor, MutableRel rel) {
+      final MutableRel rel0 = visitor.slots[ordinal];
+      assert rel0 != null : "QueryOperand should have been called first";
+      return rel0 == rel || visitor.equivalents.get(rel0).contains(rel);
     }
   }
 
+  /** Visitor that counts how many {@link QueryOperand} and
+   * {@link TargetOperand} in an operand tree. */
   private static class SlotCounter {
     int queryCount;
     int targetCount;
@@ -1891,6 +1941,8 @@ public class SubstitutionVisitor {
         ++queryCount;
       } else if (operand instanceof TargetOperand) {
         ++targetCount;
+      } else if (operand instanceof AnyOperand) {
+        // nothing
       } else {
         for (Operand input : ((InternalOperand) operand).inputs) {
           visit(input);
