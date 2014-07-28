@@ -54,6 +54,11 @@ public class Programs {
     return Lists.transform(Arrays.asList(ruleSets), RULE_SET_TO_PROGRAM);
   }
 
+  /** Creates a list of programs based on a list of rule sets. */
+  public static List<Program> listOf(List<RuleSet> ruleSets) {
+    return Lists.transform(ruleSets, RULE_SET_TO_PROGRAM);
+  }
+
   /** Creates a program from a list of rules. */
   public static Program ofRules(RelOptRule... rules) {
     return of(RuleSets.ofList(rules));
@@ -86,7 +91,7 @@ public class Programs {
       public RelNode run(RelOptPlanner planner, RelNode rel,
           RelTraitSet requiredOutputTraits) {
         final HepPlanner hepPlanner = new HepPlanner(hepProgram,
-            noDag, null, RelOptCostImpl.FACTORY);
+            null, noDag, null, RelOptCostImpl.FACTORY);
 
         if (metadataProvider != null) {
           List<RelMetadataProvider> list = Lists.newArrayList();
@@ -132,6 +137,7 @@ public class Programs {
           final List<RelOptRule> list = new ArrayList<RelOptRule>(rules);
           list.removeAll(
               ImmutableList.of(SwapJoinRule.INSTANCE,
+                  CommutativeJoinRule.INSTANCE,
                   PushJoinThroughJoinRule.LEFT,
                   PushJoinThroughJoinRule.RIGHT));
           list.add(LoptOptimizeJoinRule.INSTANCE);

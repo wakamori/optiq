@@ -25,15 +25,19 @@ import net.hydromatic.optiq.prepare.OptiqPrepareImpl;
 import net.hydromatic.optiq.prepare.PlannerImpl;
 import net.hydromatic.optiq.server.OptiqServerStatement;
 
+import org.eigenbase.relopt.Context;
 import org.eigenbase.relopt.RelOptCluster;
+import org.eigenbase.relopt.RelOptCostFactory;
 import org.eigenbase.relopt.RelOptSchema;
 import org.eigenbase.relopt.RelTraitDef;
 import org.eigenbase.sql.SqlOperatorTable;
+import org.eigenbase.sql.fun.SqlStdOperatorTable;
 import org.eigenbase.sql.parser.SqlParserImplFactory;
 import org.eigenbase.sql.parser.impl.SqlParserImpl;
 import org.eigenbase.sql2rel.SqlRexConvertletTable;
 import org.eigenbase.sql2rel.StandardConvertletTable;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 
 import java.sql.Connection;
@@ -49,117 +53,13 @@ public class Frameworks {
   }
 
   /**
-   * Creates an instance of {@code Planner}.
+   * Creates a planner.
    *
-   * @param lex The type of lexing the SqlParser should do.  Controls case rules
-   *     and quoted identifier syntax.
-   * @param defaultSchema Default schema. Must not be null.
-   * @param operatorTable The instance of SqlOperatorTable that be should to
-   *     resolve Optiq operators.
-   * @param ruleSets An array of one or more rule sets used during the course of
-   *     query evaluation. The common use case is when there is a single rule
-   *     set and {@link net.hydromatic.optiq.tools.Planner#transform}
-   *     will only be called once. However, consumers may also register multiple
-   *     {@link net.hydromatic.optiq.tools.RuleSet}s and do multiple repetitions
-   *     of {@link Planner#transform} planning cycles using different indices.
-   *     The order of rule sets provided here determines the zero-based indices
-   *     of rule sets elsewhere in this class.
-   * @return The Planner object.
+   * @param config Planner configuration
+   * @return Planner
    */
-  public static Planner getPlanner(Lex lex, SchemaPlus defaultSchema,
-      SqlOperatorTable operatorTable, RuleSet... ruleSets) {
-    return getPlanner(lex, SqlParserImpl.FACTORY, defaultSchema,
-        operatorTable, null, StandardConvertletTable.INSTANCE,
-        Programs.listOf(ruleSets));
-  }
-
-  /**
-   * Creates an instance of {@code Planner}.
-   *
-   * <p>If {@code traitDefs} is specified, the planner first de-registers any
-   * existing {@link RelTraitDef}s, then registers the {@code RelTraitDef}s in
-   * this list.</p>
-   *
-   * <p>The order of {@code RelTraitDef}s in {@code traitDefs} matters if the
-   * planner is VolcanoPlanner. The planner calls {@link RelTraitDef#convert} in
-   * the order of this list. The most important trait comes first in the list,
-   * followed by the second most important one, etc.</p>
-   *
-   * @param lex The type of lexing the SqlParser should do.  Controls case rules
-   *     and quoted identifier syntax.
-   * @param parserFactory Parser factory creates and returns the SQL parser.
-   * @param operatorTable The instance of SqlOperatorTable that be should to
-   *     resolve Optiq operators.
-   * @param ruleSets An array of one or more rule sets used during the course of
-   *     query evaluation. The common use case is when there is a single rule
-   *     set and {@link net.hydromatic.optiq.tools.Planner#transform}
-   *     will only be called once. However, consumers may also register multiple
-   *     {@link net.hydromatic.optiq.tools.RuleSet}s and do multiple repetitions
-   *     of {@link Planner#transform} planning cycles using different indices.
-   *     The order of rule sets provided here determines the zero-based indices
-   *     of rule sets elsewhere in this class.
-   *  @param  traitDefs The list of RelTraitDef that would be registered with
-   *     planner, or null.
-   * @return The Planner object.
-   *
-   * @deprecated Use {@link #getPlanner(net.hydromatic.optiq.config.Lex, org.eigenbase.sql.parser.SqlParserImplFactory, net.hydromatic.optiq.SchemaPlus, org.eigenbase.sql.SqlOperatorTable, java.util.List, org.eigenbase.sql2rel.SqlRexConvertletTable, java.util.List)}.
-   * Will be removed before optiq-0.9.
-   */
-  public static Planner getPlanner(Lex lex,
-      SqlParserImplFactory parserFactory,
-      SchemaPlus defaultSchema,
-      SqlOperatorTable operatorTable,
-      List<RelTraitDef> traitDefs,
-      SqlRexConvertletTable convertletTable,
-      RuleSet... ruleSets) {
-    org.eigenbase.util.Bug.upgrade("remove before optiq-0.9");
-    return getPlanner(lex, parserFactory, defaultSchema, operatorTable,
-        traitDefs, convertletTable, Programs.listOf(ruleSets));
-  }
-
-  /**
-   * Creates an instance of {@code Planner}.
-   *
-   * <p>If {@code traitDefs} is specified, the planner first de-registers any
-   * existing {@link RelTraitDef}s, then registers the {@code RelTraitDef}s in
-   * this list.</p>
-   *
-   * <p>The order of {@code RelTraitDef}s in {@code traitDefs} matters if the
-   * planner is VolcanoPlanner. The planner calls {@link RelTraitDef#convert} in
-   * the order of this list. The most important trait comes first in the list,
-   * followed by the second most important one, etc.</p>
-   *
-   * @param lex The type of lexing the SqlParser should do.  Controls case rules
-   *     and quoted identifier syntax.
-   * @param parserFactory Parser factory creates and returns the SQL parser.
-   * @param operatorTable The instance of SqlOperatorTable that be should to
-   *     resolve Optiq operators.
-   * @param programs List of of one or more programs used during the course of
-   *     query evaluation. The common use case is when there is a single program
-   *     created using {@link Programs#of(RuleSet)}
-   *     and {@link net.hydromatic.optiq.tools.Planner#transform}
-   *     will only be called once. However, consumers may also create programs
-   *     not based on rule sets, register multiple programs,
-   *     and do multiple repetitions
-   *     of {@link Planner#transform} planning cycles using different indices.
-   *     The order of programs provided here determines the zero-based indices
-   *     of programs elsewhere in this class.
-   *  @param  traitDefs The list of RelTraitDef that would be registered with
-   *     planner, or null.
-   * @return The Planner object.
-   */
-  public static Planner getPlanner(Lex lex,
-      SqlParserImplFactory parserFactory,
-      SchemaPlus defaultSchema,
-      SqlOperatorTable operatorTable,
-      List<RelTraitDef> traitDefs,
-      SqlRexConvertletTable convertletTable,
-      List<Program> programs) {
-    org.eigenbase.util.Bug.upgrade("remove before optiq-0.9");
-    return new PlannerImpl(lex, parserFactory, defaultSchema,
-        operatorTable, ImmutableList.copyOf(programs),
-        traitDefs == null ? null : ImmutableList.copyOf(traitDefs),
-        convertletTable);
+  public static Planner getPlanner(FrameworkConfig config) {
+    return new PlannerImpl(config);
   }
 
   /** Piece of code to be run in a context where a planner is available. The
@@ -175,9 +75,42 @@ public class Frameworks {
    * are several other useful objects. The connection and
    * {@link net.hydromatic.optiq.DataContext} are accessible from the
    * statement. */
-  public interface PrepareAction<R> {
-    R apply(RelOptCluster cluster, RelOptSchema relOptSchema,
+  public abstract static class PrepareAction<R> {
+    private final FrameworkConfig config;
+
+    public PrepareAction() {
+      this.config = newConfigBuilder() //
+          .defaultSchema(Frameworks.createRootSchema(true)).build();
+    }
+
+    public PrepareAction(FrameworkConfig config) {
+      this.config = config;
+    }
+
+    public FrameworkConfig getConfig() {
+      return config;
+    }
+
+    public abstract R apply(RelOptCluster cluster, RelOptSchema relOptSchema,
         SchemaPlus rootSchema, OptiqServerStatement statement);
+  }
+
+  /**
+   * Initializes a container then calls user-specified code with a planner.
+   *
+   * @param action Callback containing user-specified code
+   * @param config FrameworkConfig to use for planner action.
+   * @return Return value from action
+   */
+  public static <R> R withPlanner(final PlannerAction<R> action, //
+      FrameworkConfig config) {
+    return withPrepare(
+        new Frameworks.PrepareAction<R>(config) {
+          public R apply(RelOptCluster cluster, RelOptSchema relOptSchema,
+              SchemaPlus rootSchema, OptiqServerStatement statement) {
+            return action.apply(cluster, relOptSchema, rootSchema);
+          }
+        });
   }
 
   /**
@@ -187,13 +120,9 @@ public class Frameworks {
    * @return Return value from action
    */
   public static <R> R withPlanner(final PlannerAction<R> action) {
-    return withPrepare(
-        new Frameworks.PrepareAction<R>() {
-          public R apply(RelOptCluster cluster, RelOptSchema relOptSchema,
-              SchemaPlus rootSchema, OptiqServerStatement statement) {
-            return action.apply(cluster, relOptSchema, rootSchema);
-          }
-        });
+    FrameworkConfig config = newConfigBuilder() //
+        .defaultSchema(Frameworks.createRootSchema(true)).build();
+    return withPlanner(action, config);
   }
 
   /**
@@ -212,7 +141,6 @@ public class Frameworks {
           connection.unwrap(OptiqConnection.class);
       final OptiqServerStatement statement =
           optiqConnection.createStatement().unwrap(OptiqServerStatement.class);
-      //noinspection deprecation
       return new OptiqPrepareImpl().perform(statement, action);
     } catch (Exception e) {
       throw new RuntimeException(e);
@@ -227,6 +155,174 @@ public class Frameworks {
    */
   public static SchemaPlus createRootSchema(boolean addMetadataSchema) {
     return OptiqSchema.createRootSchema(addMetadataSchema).plus();
+  }
+
+  public static ConfigBuilder newConfigBuilder() {
+    return new ConfigBuilder();
+  }
+
+  /**
+   * A builder to help you build a {@link FrameworkConfig} using defaults
+   * where values aren't required.
+   */
+  public static class ConfigBuilder {
+    private SqlRexConvertletTable convertletTable =
+        StandardConvertletTable.INSTANCE;
+    private SqlOperatorTable operatorTable = SqlStdOperatorTable.instance();
+    private ImmutableList<Program> programs = ImmutableList.of();
+    private Context context;
+    private ImmutableList<RelTraitDef> traitDefs;
+    private Lex lex = Lex.ORACLE;
+    private SchemaPlus defaultSchema;
+    private RelOptCostFactory costFactory;
+    private SqlParserImplFactory parserFactory = SqlParserImpl.FACTORY;
+
+    private ConfigBuilder() {}
+
+    public FrameworkConfig build() {
+      return new StdFrameworkConfig(context, convertletTable, operatorTable,
+          programs, traitDefs, lex, defaultSchema, costFactory, parserFactory);
+    }
+
+    public ConfigBuilder context(Context c) {
+      this.context = Preconditions.checkNotNull(c);
+      return this;
+    }
+
+    public ConfigBuilder convertletTable(
+        SqlRexConvertletTable convertletTable) {
+      this.convertletTable = Preconditions.checkNotNull(convertletTable);
+      return this;
+    }
+
+    public ConfigBuilder operatorTable(SqlOperatorTable operatorTable) {
+      this.operatorTable = Preconditions.checkNotNull(operatorTable);
+      return this;
+    }
+
+    public ConfigBuilder traitDefs(List<RelTraitDef> traitDefs) {
+      if (traitDefs == null) {
+        this.traitDefs = null;
+      } else {
+        this.traitDefs = ImmutableList.copyOf(traitDefs);
+      }
+      return this;
+    }
+
+    public ConfigBuilder traitDefs(RelTraitDef... traitDefs) {
+      this.traitDefs = ImmutableList.copyOf(traitDefs);
+      return this;
+    }
+
+    public ConfigBuilder lex(Lex lex) {
+      this.lex = Preconditions.checkNotNull(lex);
+      return this;
+    }
+
+    public ConfigBuilder defaultSchema(SchemaPlus defaultSchema) {
+      this.defaultSchema = defaultSchema;
+      return this;
+    }
+
+    public ConfigBuilder costFactory(RelOptCostFactory costFactory) {
+      this.costFactory = costFactory;
+      return this;
+    }
+
+    public ConfigBuilder ruleSets(RuleSet... ruleSets) {
+      return programs(Programs.listOf(ruleSets));
+    }
+
+    public ConfigBuilder ruleSets(List<RuleSet> ruleSets) {
+      return programs(Programs.listOf(Preconditions.checkNotNull(ruleSets)));
+    }
+
+    public ConfigBuilder programs(List<Program> programs) {
+      this.programs = ImmutableList.copyOf(programs);
+      return this;
+    }
+
+    public ConfigBuilder programs(Program... programs) {
+      this.programs = ImmutableList.copyOf(programs);
+      return this;
+    }
+
+    public ConfigBuilder parserFactory(SqlParserImplFactory parserFactory) {
+      this.parserFactory = Preconditions.checkNotNull(parserFactory);
+      return this;
+    }
+  }
+
+  /**
+   * An implementation of {@link FrameworkConfig} that uses standard Optiq
+   * classes to provide basic planner functionality.
+   */
+  static class StdFrameworkConfig implements FrameworkConfig {
+    private final Context context;
+    private final SqlRexConvertletTable convertletTable;
+    private final SqlOperatorTable operatorTable;
+    private final ImmutableList<Program> programs;
+    private final ImmutableList<RelTraitDef> traitDefs;
+    private final Lex lex;
+    private final SchemaPlus defaultSchema;
+    private final RelOptCostFactory costFactory;
+    private final SqlParserImplFactory parserFactory;
+
+    public StdFrameworkConfig(Context context,
+        SqlRexConvertletTable convertletTable,
+        SqlOperatorTable operatorTable,
+        ImmutableList<Program> programs,
+        ImmutableList<RelTraitDef> traitDefs,
+        Lex lex,
+        SchemaPlus defaultSchema,
+        RelOptCostFactory costFactory,
+        SqlParserImplFactory parserFactory) {
+      this.context = context;
+      this.convertletTable = convertletTable;
+      this.operatorTable = operatorTable;
+      this.programs = programs;
+      this.traitDefs = traitDefs;
+      this.lex = lex;
+      this.defaultSchema = defaultSchema;
+      this.costFactory = costFactory;
+      this.parserFactory = parserFactory;
+    }
+
+    public Lex getLex() {
+      return lex;
+    }
+
+    public SqlParserImplFactory getParserFactory() {
+      return parserFactory;
+    }
+
+    public SchemaPlus getDefaultSchema() {
+      return defaultSchema;
+    }
+
+    public ImmutableList<Program> getPrograms() {
+      return programs;
+    }
+
+    public RelOptCostFactory getCostFactory() {
+      return costFactory;
+    }
+
+    public ImmutableList<RelTraitDef> getTraitDefs() {
+      return traitDefs;
+    }
+
+    public SqlRexConvertletTable getConvertletTable() {
+      return convertletTable;
+    }
+
+    public Context getContext() {
+      return context;
+    }
+
+    public SqlOperatorTable getOperatorTable() {
+      return operatorTable;
+    }
   }
 }
 

@@ -22,6 +22,7 @@ import net.hydromatic.optiq.config.Lex;
 import net.hydromatic.optiq.impl.java.ReflectiveSchema;
 import net.hydromatic.optiq.impl.jdbc.*;
 import net.hydromatic.optiq.impl.jdbc.JdbcRules.JdbcProjectRel;
+import net.hydromatic.optiq.prepare.OptiqPrepareImpl;
 import net.hydromatic.optiq.rules.java.EnumerableConvention;
 import net.hydromatic.optiq.rules.java.JavaRules;
 import net.hydromatic.optiq.rules.java.JavaRules.EnumerableProjectRel;
@@ -37,13 +38,11 @@ import org.eigenbase.reltype.RelDataTypeFactory;
 import org.eigenbase.sql.*;
 import org.eigenbase.sql.fun.SqlStdOperatorTable;
 import org.eigenbase.sql.parser.SqlParseException;
-import org.eigenbase.sql.parser.impl.SqlParserImpl;
 import org.eigenbase.sql.type.*;
 import org.eigenbase.sql.util.ChainedSqlOperatorTable;
 import org.eigenbase.sql.util.ListSqlOperatorTable;
 import org.eigenbase.sql.validate.SqlValidator;
 import org.eigenbase.sql.validate.SqlValidatorScope;
-import org.eigenbase.sql2rel.StandardConvertletTable;
 import org.eigenbase.util.Util;
 
 import com.google.common.collect.ImmutableList;
@@ -144,9 +143,10 @@ public class PlannerTest {
         ImmutableList.of(stdOpTab,
             new ListSqlOperatorTable(
                 ImmutableList.<SqlOperator>of(new MyCountAggFunction()))));
-    Planner planner = Frameworks.getPlanner(Lex.ORACLE, SqlParserImpl.FACTORY,
-        createHrSchema(), opTab, null, StandardConvertletTable.INSTANCE,
-        ImmutableList.<Program>of());
+    Planner planner = Frameworks.getPlanner(Frameworks.newConfigBuilder() //
+        .defaultSchema(createHrSchema()) //
+        .operatorTable(opTab) //
+        .build());
     SqlNode parse =
         planner.parse("select \"deptno\", my_count(\"empid\") from \"emps\"\n"
             + "group by \"deptno\"");
@@ -181,9 +181,12 @@ public class PlannerTest {
   }
 
   private Planner getPlanner(List<RelTraitDef> traitDefs, Program... programs) {
-    return Frameworks.getPlanner(Lex.ORACLE, SqlParserImpl.FACTORY,
-        createHrSchema(), SqlStdOperatorTable.instance(), traitDefs,
-        StandardConvertletTable.INSTANCE, ImmutableList.copyOf(programs));
+    return Frameworks.getPlanner(Frameworks.newConfigBuilder() //
+        .lex(Lex.ORACLE) //
+        .defaultSchema(createHrSchema()) //
+        .traitDefs(traitDefs) //
+        .programs(programs) //
+        .build());
   }
 
   /** Tests that planner throws an error if you pass to
@@ -541,7 +544,9 @@ public class PlannerTest {
           JavaRules.ENUMERABLE_ONE_ROW_RULE,
           JavaRules.ENUMERABLE_EMPTY_RULE,
           TableAccessRule.INSTANCE,
-          MergeProjectRule.INSTANCE,
+          OptiqPrepareImpl.COMMUTE
+              ? CommutativeJoinRule.INSTANCE
+              : MergeProjectRule.INSTANCE,
           PushFilterPastProjectRule.INSTANCE,
           PushFilterPastJoinRule.FILTER_ON_JOIN,
           RemoveDistinctAggregateRule.INSTANCE,
@@ -578,8 +583,11 @@ public class PlannerTest {
         Frameworks.createRootSchema(true).add("tpch",
             new ReflectiveSchema(new TpchSchema()));
 
-    Planner p = Frameworks.getPlanner(Lex.MYSQL, schema,
-        SqlStdOperatorTable.instance(), RuleSets.ofList(RULE_SET));
+    Planner p = Frameworks.getPlanner(Frameworks.newConfigBuilder() //
+        .lex(Lex.MYSQL) //
+        .defaultSchema(schema) //
+        .programs(Programs.ofRules(RULE_SET)) //
+        .build());
     SqlNode n = p.parse(tpchTestQuery);
     n = p.validate(n);
     RelNode r = p.convert(n);

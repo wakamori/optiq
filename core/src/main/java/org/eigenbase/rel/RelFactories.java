@@ -20,17 +20,25 @@ package org.eigenbase.rel;
 
 import java.util.AbstractList;
 import java.util.List;
+import java.util.Set;
 
+import org.eigenbase.relopt.RelOptCluster;
+import org.eigenbase.reltype.RelDataTypeField;
+import org.eigenbase.rex.RexBuilder;
 import org.eigenbase.rex.RexNode;
+import org.eigenbase.util.mapping.Mappings;
+
+import com.google.common.collect.ImmutableList;
 
 /**
  * Contains factory interface and default implementation for creating various
  * rel nodes.
  */
 public class RelFactories {
-
   public static final ProjectFactory DEFAULT_PROJECT_FACTORY =
       new ProjectFactoryImpl();
+
+  public static final JoinFactory DEFAULT_JOIN_FACTORY = new JoinFactoryImpl();
 
   private RelFactories() {
   }
@@ -60,11 +68,48 @@ public class RelFactories {
   }
 
   /**
+   * Can create a {@link org.eigenbase.rel.JoinRelBase} of the appropriate type
+   * for this rule's calling convention.
+   */
+  public interface JoinFactory {
+    /**
+     * Creates a join.
+     *
+     * @param left             Left input
+     * @param right            Right input
+     * @param condition        Join condition
+     * @param joinType         Join type
+     * @param variablesStopped Set of names of variables which are set by the
+     *                         LHS and used by the RHS and are not available to
+     *                         nodes above this JoinRel in the tree
+     * @param semiJoinDone     Whether this join has been translated to a
+     *                         semi-join
+     */
+    RelNode createJoin(RelNode left, RelNode right, RexNode condition,
+        JoinRelType joinType, Set<String> variablesStopped,
+        boolean semiJoinDone);
+  }
+
+  /**
+   * Implementation of {@link JoinFactory} that returns vanilla
+   * {@link JoinRel}.
+   */
+  private static class JoinFactoryImpl implements JoinFactory {
+    public RelNode createJoin(RelNode left, RelNode right, RexNode condition,
+        JoinRelType joinType, Set<String> variablesStopped,
+        boolean semiJoinDone) {
+      final RelOptCluster cluster = left.getCluster();
+      return new JoinRel(cluster, left, right, condition, joinType,
+          variablesStopped, semiJoinDone, ImmutableList.<RelDataTypeField>of());
+    }
+  }
+
+  /**
    * Creates a relational expression that projects the given fields of the
    * input.
-   * <p>
-   * Optimizes if the fields are the identity projection.
-   * </p>
+   *
+   * <p>Optimizes if the fields are the identity projection.
+   *
    * @param factory
    *          ProjectFactory
    * @param child
@@ -75,32 +120,23 @@ public class RelFactories {
    */
   public static RelNode createProject(final ProjectFactory factory,
       final RelNode child, final List<Integer> posList) {
-    if (isIdentity(posList, child.getRowType().getFieldCount())) {
+    if (Mappings.isIdentity(posList, child.getRowType().getFieldCount())) {
       return child;
     }
-    return factory.createProject(child, new AbstractList<RexNode>() {
-      public int size() {
-        return posList.size();
-      }
+    final RexBuilder rexBuilder = child.getCluster().getRexBuilder();
+    return factory.createProject(child,
+        new AbstractList<RexNode>() {
+          public int size() {
+            return posList.size();
+          }
 
-      public RexNode get(int index) {
-        final int pos = posList.get(index);
-        return child.getCluster().getRexBuilder().makeInputRef(child, pos);
-      }
-    }, null);
+          public RexNode get(int index) {
+            final int pos = posList.get(index);
+            return rexBuilder.makeInputRef(child, pos);
+          }
+        },
+        null);
   }
-
-  private static boolean isIdentity(List<Integer> list, int count) {
-    if (list.size() != count) {
-      return false;
-    }
-    for (int i = 0; i < count; i++) {
-      final Integer o = list.get(i);
-      if (o == null || o != i) {
-        return false;
-      }
-    }
-    return true;
-  }
-
 }
+
+// End RelFactories.java

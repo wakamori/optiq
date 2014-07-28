@@ -187,7 +187,7 @@ public class RexBuilder {
   }
 
   /**
-   * Creates a call with an array of arguments and a predetermined type.
+   * Creates a call with a list of arguments and a predetermined type.
    */
   public RexNode makeCall(
       RelDataType returnType,
@@ -199,24 +199,14 @@ public class RexBuilder {
   /**
    * Creates a call with an array of arguments.
    *
-   * <p>This is the fundamental method called by all of the other <code>
-   * makeCall</code> methods. If you derive a class from {@link RexBuilder},
-   * this is the only method you need to override.</p>
+   * <p>If you already know the return type of the call, then
+   * {@link #makeCall(org.eigenbase.reltype.RelDataType, org.eigenbase.sql.SqlOperator, java.util.List)}
+   * is preferred.</p>
    */
   public RexNode makeCall(
       SqlOperator op,
       List<? extends RexNode> exprs) {
-    // TODO jvs 12-Jun-2010:  Find a better place for this;
-    // it surely does not belong here.
-    if (op == SqlStdOperatorTable.AND
-        && exprs.size() == 2
-        && exprs.get(0).equals(exprs.get(1))) {
-      // Avoid generating 'AND(x, x)'; this can cause plan explosions if a
-      // relnode is its own child and is merged with itself.
-      return exprs.get(0);
-    }
-
-    final RelDataType type = deriveReturnType(op, typeFactory, exprs);
+    final RelDataType type = deriveReturnType(op, exprs);
     return new RexCall(type, op, exprs);
   }
 
@@ -233,29 +223,14 @@ public class RexBuilder {
   }
 
   /**
-   * Creates a call with an array of arguments.
-   *
-   * <p>This is the fundamental method called by all of the other <code>
-   * makeCall</code> methods. If you derive a class from {@link RexBuilder},
-   * this is the only method you need to override.</p>
-   */
-  public RexNode makeFlatCall(
-      SqlOperator op,
-      List<? extends RexNode> exprs) {
-    return makeCall(op, RexUtil.flatten(exprs, op));
-  }
-
-  /**
    * Derives the return type of a call to an operator.
    *
    * @param op          the operator being called
-   * @param typeFactory factory for return type
    * @param exprs       actual operands
    * @return derived type
    */
   public RelDataType deriveReturnType(
       SqlOperator op,
-      RelDataTypeFactory typeFactory,
       List<? extends RexNode> exprs) {
     return op.inferReturnType(new RexCallBinding(typeFactory, op, exprs));
   }
@@ -281,11 +256,11 @@ public class RexBuilder {
       final List<RelDataType> aggArgTypes) {
     if (aggCall.getAggregation() instanceof SqlCountAggFunction
         && !aggCall.isDistinct()) {
-      final List<Integer> notNullArgList =
-          nullableArgs(aggCall.getArgList(), aggArgTypes);
-      if (!notNullArgList.equals(aggCall.getArgList())) {
+      final List<Integer> args = aggCall.getArgList();
+      final List<Integer> nullableArgs = nullableArgs(args, aggArgTypes);
+      if (!nullableArgs.equals(args)) {
         aggCall = new AggregateCall(aggCall.getAggregation(),
-            aggCall.isDistinct(), notNullArgList,
+            aggCall.isDistinct(), nullableArgs,
             aggCall.getType(), aggCall.getName());
       }
     }

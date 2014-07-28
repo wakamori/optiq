@@ -61,4 +61,178 @@ select cast(c_timestamp as varchar(20)), cast(c_timestamp as date) from data whe
 !ok
 !}
 
+# [DRILL-1149]
+select *, upper("name")
+from "hr"."emps";
++-------+--------+-----------+---------+------------+-----------+
+| empid | deptno | name      | salary  | commission | EXPR$5    |
++-------+--------+-----------+---------+------------+-----------+
+|   100 |     10 | Bill      | 10000.0 |       1000 | BILL      |
+|   110 |     10 | Theodore  | 11500.0 |        250 | THEODORE  |
+|   150 |     10 | Sebastian | 7000.0  |            | SEBASTIAN |
+|   200 |     20 | Eric      | 8000.0  |        500 | ERIC      |
++-------+--------+-----------+---------+------------+-----------+
+(4 rows)
+
+!ok
+
+# [OPTIQ-340] SqlToRelConverter fails with complex join condition
+select e."deptno", d."deptno"
+from "hr"."emps" as e
+join "hr"."depts" as d
+on ( e."deptno" + 1 - 1 = d."deptno" + 2 - 2  and e."deptno" + 10 - 10 = d."deptno" + 20 - 20);
++--------+--------+
+| deptno | deptno |
++--------+--------+
+|     10 |     10 |
+|     10 |     10 |
+|     10 |     10 |
++--------+--------+
+(3 rows)
+
+!ok
+
+# [OPTIQ-340] SqlToRelConverter fails with complex join condition. Switch LHS and RHS.
+select e."deptno", d."deptno"
+from "hr"."emps" as e
+join "hr"."depts" as d
+on ( d."deptno" + 2 - 2 = e."deptno" + 1 - 1  and d."deptno" + 20 - 20 = e."deptno" + 10 - 10);
++--------+--------+
+| deptno | deptno |
++--------+--------+
+|     10 |     10 |
+|     10 |     10 |
+|     10 |     10 |
++--------+--------+
+(3 rows)
+
+!ok
+
+# [OPTIQ-340] SqlToRelConverter fails with complex join condition. Switch LHS and RHS.
+select e."deptno", d."deptno"
+from "hr"."emps" as e
+join "hr"."depts" as d
+on ( d."deptno" + 2 - 2 = e."deptno" + 1 - 1  and e."deptno" + 10 - 10 = d."deptno" + 20 - 20);
++--------+--------+
+| deptno | deptno |
++--------+--------+
+|     10 |     10 |
+|     10 |     10 |
+|     10 |     10 |
++--------+--------+
+(3 rows)
+
+!ok
+
+# [OPTIQ-345] AssertionError in RexToLixTranslator comparing to date literal
+!use catchall
+select count(*) as c from "everyTypes" where "sqlDate" = DATE '1970-01-01';
++---+
+| C |
++---+
+| 1 |
++---+
+(1 row)
+
+!ok
+select count(*) as c from "everyTypes" where "sqlDate" = DATE '1971-02-03';
++---+
+| C |
++---+
+| 0 |
++---+
+(1 row)
+
+!ok
+select count(*) as c from "everyTypes" where "sqlDate" > DATE '1970-01-01';
++---+
+| C |
++---+
+| 0 |
++---+
+(1 row)
+
+!ok
+select count(*) as c from "everyTypes" where "sqlTime" = TIME '01:23:45';
++---+
+| C |
++---+
+| 0 |
++---+
+(1 row)
+
+!ok
+select count(*) as c from "everyTypes" where "sqlTimestamp" = TIMESTAMP '1970-01-01 01:23:45';
++---+
+| C |
++---+
+| 0 |
++---+
+(1 row)
+
+!ok
+select count(*) as c from "everyTypes" where "utilDate" = TIMESTAMP '1970-01-01 01:23:45';
++---+
+| C |
++---+
+| 0 |
++---+
+(1 row)
+
+!ok
+
+# [OPTIQ-346] Add commutative join rule
+#
+# 3-way join that does not require bushy join.  Best plan is: sales_fact_1997 as
+# left-most leaf, then customer (with filter), then product.
+!use foodmart
+select *
+from "sales_fact_1997" as s
+  join "customer" as c using ("customer_id")
+  join "product" as p using ("product_id")
+where c."city" = 'San Francisco';
+EnumerableJoinRel(condition=[=($0, $38)], joinType=[inner])
+  EnumerableJoinRel(condition=[=($2, $8)], joinType=[inner])
+    EnumerableTableAccessRel(table=[[foodmart2, sales_fact_1997]])
+    EnumerableCalcRel(expr#0..28=[{inputs}], expr#29=['San Francisco'], expr#30=[=($t9, $t29)], proj#0..28=[{exprs}], $condition=[$t30])
+      EnumerableTableAccessRel(table=[[foodmart2, customer]])
+  EnumerableTableAccessRel(table=[[foodmart2, product]])
+!plan
+
+# 4-way join whose optimal plan requires bushy join.
+#
+# In the plan, note that filters on customer.city and product_department are
+# pushed down. And the plan is a bushy join, with sub-joins (product_class,
+# product) and (sales_fact_1997, customer).  However, scan(sales_fact_1997)
+# should be left-most leaf, but is not because CommutativeJoinRule is currently
+# disabled.
+!use foodmart
+select *
+from "sales_fact_1997" as s
+  join "customer" as c using ("customer_id")
+  join "product" as p using ("product_id")
+  join "product_class" as pc using ("product_class_id")
+where c."city" = 'San Francisco'
+ and pc."product_department" = 'Snacks';
+EnumerableCalcRel(expr#0..56=[{inputs}], $f0=[$t20], $f1=[$t21], $f2=[$t22], $f3=[$t23], $f4=[$t24], $f5=[$t25], $f6=[$t26], $f7=[$t27], $f8=[$t28], $f9=[$t29], $f10=[$t30], $f11=[$t31], $f12=[$t32], $f13=[$t33], $f14=[$t34], $f15=[$t35], $f16=[$t36], $f17=[$t37], $f18=[$t38], $f19=[$t39], $f20=[$t40], $f21=[$t41], $f22=[$t42], $f23=[$t43], $f24=[$t44], $f25=[$t45], $f26=[$t46], $f27=[$t47], $f28=[$t48], $f29=[$t49], $f30=[$t50], $f31=[$t51], $f32=[$t52], $f33=[$t53], $f34=[$t54], $f35=[$t55], $f36=[$t56], $f37=[$t5], $f38=[$t6], $f39=[$t7], $f40=[$t8], $f41=[$t9], $f42=[$t10], $f43=[$t11], $f44=[$t12], $f45=[$t13], $f46=[$t14], $f47=[$t15], $f48=[$t16], $f49=[$t17], $f50=[$t18], $f51=[$t19], $f52=[$t0], $f53=[$t1], $f54=[$t2], $f55=[$t3], $f56=[$t4])
+  EnumerableJoinRel(condition=[=($20, $6)], joinType=[inner])
+    EnumerableJoinRel(condition=[=($5, $0)], joinType=[inner])
+      EnumerableCalcRel(expr#0..4=[{inputs}], expr#5=['Snacks'], expr#6=[=($t3, $t5)], proj#0..4=[{exprs}], $condition=[$t6])
+        EnumerableTableAccessRel(table=[[foodmart2, product_class]])
+      EnumerableTableAccessRel(table=[[foodmart2, product]])
+    EnumerableJoinRel(condition=[=($2, $8)], joinType=[inner])
+      EnumerableTableAccessRel(table=[[foodmart2, sales_fact_1997]])
+      EnumerableCalcRel(expr#0..28=[{inputs}], expr#29=['San Francisco'], expr#30=[=($t9, $t29)], proj#0..28=[{exprs}], $condition=[$t30])
+        EnumerableTableAccessRel(table=[[foodmart2, customer]])
+!plan
+
+# Check that when filters are merged, duplicate conditions are eliminated.
+select * from (
+  select * from "days"
+  where "day" = 1)
+where "day" = 1;
+EnumerableCalcRel(expr#0..1=[{inputs}], expr#2=[1], expr#3=[=($t0, $t2)], proj#0..1=[{exprs}], $condition=[$t3])
+  EnumerableTableAccessRel(table=[[foodmart2, days]])
+!plan
+
 # End misc.oq

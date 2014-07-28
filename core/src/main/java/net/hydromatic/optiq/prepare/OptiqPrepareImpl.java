@@ -83,6 +83,10 @@ public class OptiqPrepareImpl implements OptiqPrepare {
   public static final boolean DEBUG =
       "true".equals(System.getProperties().getProperty("optiq.debug"));
 
+  public static final boolean COMMUTE =
+      "true".equals(
+          System.getProperties().getProperty("optiq.enable.join.commute"));
+
   /** Whether to enable the collation trait. Some extra optimizations are
    * possible if enabled, but queries should work either way. At some point
    * this will become a preference, or we will run multiple phases: first
@@ -118,7 +122,9 @@ public class OptiqPrepareImpl implements OptiqPrepare {
           JavaRules.ENUMERABLE_EMPTY_RULE,
           JavaRules.ENUMERABLE_TABLE_FUNCTION_RULE,
           TableAccessRule.INSTANCE,
-          MergeProjectRule.INSTANCE,
+          COMMUTE
+              ? CommutativeJoinRule.INSTANCE
+              : MergeProjectRule.INSTANCE,
           PushFilterPastProjectRule.INSTANCE,
           PushFilterPastJoinRule.FILTER_ON_JOIN,
           RemoveDistinctAggregateRule.INSTANCE,
@@ -182,15 +188,24 @@ public class OptiqPrepareImpl implements OptiqPrepare {
     return Collections.<Function1<Context, RelOptPlanner>>singletonList(
         new Function1<Context, RelOptPlanner>() {
           public RelOptPlanner apply(Context context) {
-            return createPlanner(context);
+            return createPlanner(context, null, null);
           }
         });
   }
 
   /** Creates a query planner and initializes it with a default set of
    * rules. */
-  protected RelOptPlanner createPlanner(Context context) {
-    final VolcanoPlanner planner = new VolcanoPlanner();
+  protected RelOptPlanner createPlanner(OptiqPrepare.Context prepareContext) {
+    return createPlanner(prepareContext, null, null);
+  }
+
+  /** Creates a query planner and initializes it with a default set of
+   * rules. */
+  protected RelOptPlanner createPlanner(OptiqPrepare.Context prepareContext,
+      org.eigenbase.relopt.Context externalContext,
+      RelOptCostFactory costFactory) {
+    final VolcanoPlanner planner =
+        new VolcanoPlanner(costFactory, externalContext);
     planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
     if (ENABLE_COLLATION_TRAIT) {
       planner.addRelTraitDef(RelCollationTraitDef.INSTANCE);
@@ -208,7 +223,7 @@ public class OptiqPrepareImpl implements OptiqPrepare {
       }
     }
 
-    final SparkHandler spark = context.spark();
+    final SparkHandler spark = prepareContext.spark();
     if (spark.enabled()) {
       spark.registerRules(
           new SparkHandler.RuleSetBuilder() {
@@ -545,20 +560,24 @@ public class OptiqPrepareImpl implements OptiqPrepare {
   /** Executes a prepare action. */
   public <R> R perform(OptiqServerStatement statement,
       Frameworks.PrepareAction<R> action) {
-    final Context context = statement.createPrepareContext();
-    final JavaTypeFactory typeFactory = context.getTypeFactory();
-    OptiqCatalogReader catalogReader = new OptiqCatalogReader(
-        context.getRootSchema(),
-        context.config().caseSensitive(),
-        context.getDefaultSchemaPath(),
-        typeFactory);
+    final OptiqPrepare.Context prepareContext =
+        statement.createPrepareContext();
+    final JavaTypeFactory typeFactory = prepareContext.getTypeFactory();
+    OptiqCatalogReader catalogReader =
+        new OptiqCatalogReader(prepareContext.getRootSchema(),
+            prepareContext.config().caseSensitive(),
+            prepareContext.getDefaultSchemaPath(),
+            typeFactory);
     final RexBuilder rexBuilder = new RexBuilder(typeFactory);
-    final RelOptPlanner planner = createPlanner(context);
+    final RelOptPlanner planner =
+        createPlanner(prepareContext,
+            action.getConfig().getContext(),
+            action.getConfig().getCostFactory());
     final RelOptQuery query = new RelOptQuery(planner);
     final RelOptCluster cluster =
         query.createCluster(rexBuilder.getTypeFactory(), rexBuilder);
-    return action.apply(cluster, catalogReader, context.getRootSchema().plus(),
-        statement);
+    return action.apply(cluster, catalogReader,
+        prepareContext.getRootSchema().plus(), statement);
   }
 
   static class OptiqPreparingStmt extends Prepare
@@ -908,8 +927,7 @@ public class OptiqPrepareImpl implements OptiqPrepare {
             ((MemberExpression) expression).field.getName(),
             true);
       case GreaterThan:
-        return binary(
-            expression, SqlStdOperatorTable.GREATER_THAN);
+        return binary(expression, SqlStdOperatorTable.GREATER_THAN);
       case LessThan:
         return binary(expression, SqlStdOperatorTable.LESS_THAN);
       case Parameter:
@@ -920,6 +938,7 @@ public class OptiqPrepareImpl implements OptiqPrepare {
             RexToLixTranslator.JAVA_TO_SQL_METHOD_MAP.get(call.method);
         if (operator != null) {
           return rexBuilder.makeCall(
+              type(call),
               operator,
               toRex(
                   Expressions.<Expression>list()
@@ -957,8 +976,8 @@ public class OptiqPrepareImpl implements OptiqPrepare {
 
     private RexNode binary(Expression expression, SqlBinaryOperator op) {
       BinaryExpression call = (BinaryExpression) expression;
-      return rexBuilder.makeCall(
-          op, toRex(ImmutableList.of(call.expression0, call.expression1)));
+      return rexBuilder.makeCall(type(call), op,
+          toRex(ImmutableList.of(call.expression0, call.expression1)));
     }
 
     private List<RexNode> toRex(List<Expression> expressions) {
@@ -967,6 +986,11 @@ public class OptiqPrepareImpl implements OptiqPrepare {
         list.add(toRex(expression));
       }
       return list;
+    }
+
+    protected RelDataType type(Expression expression) {
+      final Type type = expression.getType();
+      return ((JavaTypeFactory) rexBuilder.getTypeFactory()).createType(type);
     }
 
     public ScalarTranslator bind(

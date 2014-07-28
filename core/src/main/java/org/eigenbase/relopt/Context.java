@@ -15,24 +15,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 */
-package net.hydromatic.optiq.model;
-
-import java.util.List;
+package org.eigenbase.relopt;
 
 /**
- * Function schema element.
- *
- * @see JsonRoot Description of schema elements
+ * Provides library users a way to store data within the planner session and
+ * access it within rules. Frameworks can implement their own implementation
+ * of Context and pass that as part of the FrameworkConfig.
  */
-public class JsonFunction {
-  public String name;
-  public String className;
-  public String methodName;
-  public List<String> path;
+public interface Context {
 
-  public void accept(ModelHandler handler) {
-    handler.visit(this);
-  }
+  /**
+   * If assignable to clazz, provide the underlying clazz.
+   * @param clazz The Class object of the desired class.
+   * @return Underlying object if matches, otherwise null.
+   */
+  <T> T unwrap(Class<T> clazz);
+
 }
-
-// End JsonFunction.java

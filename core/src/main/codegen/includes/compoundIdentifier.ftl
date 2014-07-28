@@ -1,4 +1,4 @@
-/*
+<#--
 // Licensed to Julian Hyde under one or more contributor license
 // agreements. See the NOTICE file distributed with this work for
 // additional information regarding copyright ownership.
@@ -14,25 +14,22 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-*/
-package net.hydromatic.optiq.model;
+-->
 
-import java.util.List;
-
-/**
- * Function schema element.
- *
- * @see JsonRoot Description of schema elements
- */
-public class JsonFunction {
-  public String name;
-  public String className;
-  public String methodName;
-  public List<String> path;
-
-  public void accept(ModelHandler handler) {
-    handler.visit(this);
+<#--
+  Add implementations of additional parser statements, literals or
+  data types.
+ 
+  Example of SqlShowTables() implementation:
+  SqlNode SqlShowTables()
+  {
+    ...local variables...
   }
-}
-
-// End JsonFunction.java
+  {
+    <SHOW> <TABLES>
+    ...
+    {
+      return SqlShowTables(...)
+    }
+  }
+-->

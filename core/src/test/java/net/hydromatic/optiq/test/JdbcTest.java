@@ -406,8 +406,8 @@ public class JdbcTest {
         + "where n < 15");
     // The call to "View('(10), (2)')" expands to 'values (1), (3), (10), (20)'.
     assertThat(OptiqAssert.toString(resultSet),
-        equalTo(
-            "N=1\n"
+        equalTo(""
+            + "N=1\n"
             + "N=3\n"
             + "N=10\n"));
   }
@@ -453,8 +453,8 @@ public class JdbcTest {
             + "     }\n"
             + "   ]\n"
             + "}").query("select * from table(\"adhoc\".\"View\"('(30)'))")
-        .returns(
-            "c=1\n"
+        .returns(""
+            + "c=1\n"
             + "c=3\n"
             + "c=30\n");
   }
@@ -773,23 +773,21 @@ public class JdbcTest {
     // version is stored in pom.xml; major and minor version are
     // stored in net-hydromatic-optiq-jdbc.properties, but derived from
     // version.major and version.minor in pom.xml.
-    if (!driverVersion.endsWith("-SNAPSHOT")) {
-      assertTrue(driverVersion.startsWith("0."));
-      String[] split = driverVersion.split("\\.");
-      assertTrue(split.length >= 2);
-      final String majorMinor = driverMajorVersion + "." + driverMinorVersion;
-      assertTrue(driverVersion.equals(majorMinor)
-          || driverVersion.startsWith(majorMinor + "."));
-    }
-    if (!databaseProductVersion.endsWith("-SNAPSHOT")) {
-      assertTrue(databaseProductVersion.startsWith("0."));
-      String[] split = databaseProductVersion.split("\\.");
-      assertTrue(split.length >= 2);
-      final String majorMinor =
-          databaseMajorVersion + "." + databaseMinorVersion;
-      assertTrue(databaseProductVersion.equals(majorMinor)
-          || databaseProductVersion.startsWith(majorMinor + "."));
-    }
+    assertTrue(driverVersion.startsWith("0."));
+    String[] split = driverVersion.split("\\.");
+    assertTrue(split.length >= 2);
+    String majorMinor = driverMajorVersion + "." + driverMinorVersion;
+    assertTrue(driverVersion.equals(majorMinor)
+        || driverVersion.startsWith(majorMinor + ".")
+        || driverVersion.startsWith(majorMinor + "-"));
+
+    assertTrue(databaseProductVersion.startsWith("0."));
+    split = databaseProductVersion.split("\\.");
+    assertTrue(split.length >= 2);
+    majorMinor = databaseMajorVersion + "." + databaseMinorVersion;
+    assertTrue(databaseProductVersion.equals(majorMinor)
+        || databaseProductVersion.startsWith(majorMinor + ".")
+        || databaseProductVersion.startsWith(majorMinor + "-"));
 
     connection.close();
   }
@@ -906,8 +904,8 @@ public class JdbcTest {
                 try {
                   Statement s = c.createStatement();
                   ResultSet rs =
-                      s.executeQuery(
-                          "SELECT 1 as \"a\", 2 as \"b\", 3 as \"a\", 4 as \"B\"\n"
+                      s.executeQuery(""
+                          + "SELECT 1 as \"a\", 2 as \"b\", 3 as \"a\", 4 as \"B\"\n"
                           + "FROM (VALUES (0))");
                   assertTrue(rs.next());
                   assertEquals(1, rs.getInt("a"));
@@ -980,8 +978,8 @@ public class JdbcTest {
             + "from \"foodmart2\".\"time_by_day\"\n"
             + "group by \"the_year\"\n"
             + "order by 1, 2")
-        .returns(
-            "the_year=1997; C=365; M=April\n"
+        .returns(""
+            + "the_year=1997; C=365; M=April\n"
             + "the_year=1998; C=365; M=April\n");
   }
 
@@ -1035,6 +1033,55 @@ public class JdbcTest {
         .returns(
             "c0=1997\n"
             + "c0=1998\n");
+  }
+
+  /** Just short of bushy. */
+  @Test public void testAlmostBushy() {
+    OptiqAssert.that()
+        .with(OptiqAssert.Config.FOODMART_CLONE)
+        .query("select *\n"
+            + "from \"sales_fact_1997\" as s\n"
+            + "  join \"customer\" as c using (\"customer_id\")\n"
+            + "  join \"product\" as p using (\"product_id\")\n"
+            + "where c.\"city\" = 'San Francisco'\n"
+            + "and p.\"brand_name\" = 'Washington'")
+        .explainMatches("including all attributes ",
+            OptiqAssert.checkMaskedResultContains(""
+                + "EnumerableJoinRel(condition=[=($0, $38)], joinType=[inner]): rowcount = 7.050660528307499E8, cumulative cost = {1.0640240206183146E9 rows, 777302.0 cpu, 0.0 io}\n"
+                + "  EnumerableJoinRel(condition=[=($2, $8)], joinType=[inner]): rowcount = 2.0087351932499997E7, cumulative cost = {2.117504619375143E7 rows, 724261.0 cpu, 0.0 io}\n"
+                + "    EnumerableTableAccessRel(table=[[foodmart2, sales_fact_1997]]): rowcount = 86837.0, cumulative cost = {86837.0 rows, 86838.0 cpu, 0.0 io}\n"
+                + "    EnumerableCalcRel(expr#0..28=[{inputs}], expr#29=['San Francisco'], expr#30=[=($t9, $t29)], proj#0..28=[{exprs}], $condition=[$t30]): rowcount = 1542.1499999999999, cumulative cost = {11823.15 rows, 637423.0 cpu, 0.0 io}\n"
+                + "      EnumerableTableAccessRel(table=[[foodmart2, customer]]): rowcount = 10281.0, cumulative cost = {10281.0 rows, 10282.0 cpu, 0.0 io}\n"
+                + "  EnumerableCalcRel(expr#0..14=[{inputs}], expr#15=['Washington'], expr#16=[=($t2, $t15)], proj#0..14=[{exprs}], $condition=[$t16]): rowcount = 234.0, cumulative cost = {1794.0 rows, 53041.0 cpu, 0.0 io}\n"
+                + "    EnumerableTableAccessRel(table=[[foodmart2, product]]): rowcount = 1560.0, cumulative cost = {1560.0 rows, 1561.0 cpu, 0.0 io}\n"));
+  }
+
+  /** Tests a query whose best plan is a bushy join.
+   * First join sales_fact_1997 to customer;
+   * in parallel join product to product_class;
+   * then join the results. */
+  @Ignore("extremely slow - a bit better if you disable MergeProjectRule")
+  @Test public void testBushy() {
+    OptiqAssert.that()
+      .with(OptiqAssert.Config.FOODMART_CLONE)
+      .query(
+        "select *\n"
+        + "from \"sales_fact_1997\" as s\n"
+        + "  join \"customer\" as c using (\"customer_id\")\n"
+        + "  join \"product\" as p using (\"product_id\")\n"
+        + "  join \"product_class\" as pc using (\"product_class_id\")\n"
+        + "where c.\"city\" = 'San Francisco'\n"
+        + "and pc.\"product_department\" = 'Snacks'\n")
+        .explainMatches("including all attributes ",
+            OptiqAssert.checkMaskedResultContains(""
+                + "EnumerableCalcRel(expr#0..56=[{inputs}], expr#57=['San Francisco'], expr#58=[=($t9, $t57)], expr#59=['Snacks'], expr#60=[=($t32, $t59)], expr#61=[AND($t58, $t60)], product_id=[$t49], time_id=[$t50], customer_id=[$t51], promotion_id=[$t52], store_id=[$t53], store_sales=[$t54], store_cost=[$t55], unit_sales=[$t56], customer_id0=[$t0], account_num=[$t1], lname=[$t2], fname=[$t3], mi=[$t4], address1=[$t5], address2=[$t6], address3=[$t7], address4=[$t8], city=[$t9], state_province=[$t10], postal_code=[$t11], country=[$t12], customer_region_id=[$t13], phone1=[$t14], phone2=[$t15], birthdate=[$t16], marital_status=[$t17], yearly_income=[$t18], gender=[$t19], total_children=[$t20], num_children_at_home=[$t21], education=[$t22], date_accnt_opened=[$t23], member_card=[$t24], occupation=[$t25], houseowner=[$t26], num_cars_owned=[$t27], fullname=[$t28], product_class_id=[$t34], product_id0=[$t35], brand_name=[$t36], product_name=[$t37], SKU=[$t38], SRP=[$t39], gross_weight=[$t40], net_weight=[$t41], recyclable_package=[$t42], low_fat=[$t43], units_per_case=[$t44], cases_per_pallet=[$t45], shelf_width=[$t46], shelf_height=[$t47], shelf_depth=[$t48], product_class_id0=[$t29], product_subcategory=[$t30], product_category=[$t31], product_department=[$t32], product_family=[$t33], $condition=[$t61]): rowcount = 1953.8325, cumulative cost = {728728.1144018068 rows, 1.0519232E7 cpu, 0.0 io}\n"
+                + "  EnumerableJoinRel(condition=[=($51, $0)], joinType=[inner]): rowcount = 86837.0, cumulative cost = {726774.2819018068 rows, 98792.0 cpu, 0.0 io}\n"
+                + "    EnumerableTableAccessRel(table=[[foodmart2, customer]]): rowcount = 10281.0, cumulative cost = {10281.0 rows, 10282.0 cpu, 0.0 io}\n"
+                + "    EnumerableJoinRel(condition=[=($5, $0)], joinType=[inner]): rowcount = 86837.0, cumulative cost = {447842.86095661717 rows, 88510.0 cpu, 0.0 io}\n"
+                + "      EnumerableTableAccessRel(table=[[foodmart2, product_class]]): rowcount = 110.0, cumulative cost = {110.0 rows, 111.0 cpu, 0.0 io}\n"
+                + "      EnumerableJoinRel(condition=[=($15, $1)], joinType=[inner]): rowcount = 86837.0, cumulative cost = {273541.80811638 rows, 88399.0 cpu, 0.0 io}\n"
+                + "        EnumerableTableAccessRel(table=[[foodmart2, product]]): rowcount = 1560.0, cumulative cost = {1560.0 rows, 1561.0 cpu, 0.0 io}\n"
+                + "        EnumerableTableAccessRel(table=[[foodmart2, sales_fact_1997]]): rowcount = 86837.0, cumulative cost = {86837.0 rows, 86838.0 cpu, 0.0 io}\n"));
   }
 
   private static final String[] QUERIES = {
@@ -1344,7 +1391,7 @@ public class JdbcTest {
 
   /** Tests 3-way AND.
    *
-   * <p>With <a href="https://github.com/julianhyde/optiq/issues/127">optiq-127,
+   * <p>With <a href="https://issues.apache.org/jira/browse/OPTIQ-127">OPTIQ-127,
    * "EnumerableCalcRel can't support 3+ AND conditions"</a>, the last condition
    * is ignored and rows with deptno=10 are wrongly returned.</p>
    */
@@ -1385,7 +1432,7 @@ public class JdbcTest {
   }
 
   /** Test case for
-   * <a href="https://github.com/julianhyde/optiq/issues/281">issue #281</a>,
+   * <a href="https://issues.apache.org/jira/browse/OPTIQ-281">OPTIQ-281</a>,
    * "SQL type of EXTRACT is BIGINT but it is implemented as int". */
   @Test public void testExtract() {
     OptiqAssert.that()
@@ -1435,7 +1482,8 @@ public class JdbcTest {
   }
 
   /** Test case for
-   * <a href="https://github.com/julianhyde/optiq/issues/35">issue #35</a>. */
+   * <a href="https://issues.apache.org/jira/browse/OPTIQ-35">OPTIQ-35</a>,
+   * "Support parenthesized sub-clause in JOIN". */
   @Ignore
   @Test public void testJoinJoin() {
     OptiqAssert.that()
@@ -1877,8 +1925,8 @@ public class JdbcTest {
    * plan.
    *
    * <p>Test case for (not yet fixed)
-   * <a href="https://github.com/julianhyde/optiq/issues/92">#92</a>, "Project
-   * should be optimized away, not converted to EnumerableCalcRel".</p>
+   * <a href="https://issues.apache.org/jira/browse/OPTIQ-92">OPTIQ-92</a>,
+   * "Project should be optimized away, not converted to EnumerableCalcRel".</p>
    */
   @Ignore
   @Test public void testNoCalcBetweenJoins() throws IOException {
@@ -1968,7 +2016,7 @@ public class JdbcTest {
   }
 
   /** Test case for (not yet fixed)
-   * <a href="https://github.com/julianhyde/optiq/issues/99">issue #99</a>,
+   * <a href="https://issues.apache.org/jira/browse/OPTIQ-99">OPTIQ-99</a>,
    * "Recognize semi-join that has high selectivity and push it down". */
   @Ignore
   @Test public void testExplainJoin4() throws IOException {
@@ -2389,12 +2437,12 @@ public class JdbcTest {
         .explainContains(
             "EnumerableAggregateRel(group=[{0}], m0=[COUNT($1)])\n"
             + "  EnumerableAggregateRel(group=[{0, 1}])\n"
-            + "    EnumerableCalcRel(expr#0..3=[{inputs}], c0=[$t3], unit_sales=[$t1])\n"
-            + "      EnumerableJoinRel(condition=[=($0, $2)], joinType=[inner])\n"
-            + "        EnumerableCalcRel(expr#0..7=[{inputs}], time_id=[$t1], unit_sales=[$t7])\n"
-            + "          EnumerableTableAccessRel(table=[[foodmart2, sales_fact_1997]])\n"
+            + "    EnumerableCalcRel(expr#0..3=[{inputs}], c0=[$t1], unit_sales=[$t3])\n"
+            + "      EnumerableJoinRel(condition=[=($2, $0)], joinType=[inner])\n"
             + "        EnumerableCalcRel(expr#0..9=[{inputs}], expr#10=[CAST($t4):INTEGER], expr#11=[1997], expr#12=[=($t10, $t11)], time_id=[$t0], the_year=[$t4], $condition=[$t12])\n"
-            + "          EnumerableTableAccessRel(table=[[foodmart2, time_by_day]])")
+            + "          EnumerableTableAccessRel(table=[[foodmart2, time_by_day]])\n"
+            + "        EnumerableCalcRel(expr#0..7=[{inputs}], time_id=[$t1], unit_sales=[$t7])\n"
+            + "          EnumerableTableAccessRel(table=[[foodmart2, sales_fact_1997]])")
         .returns("c0=1997; m0=6\n");
   }
 
@@ -2542,7 +2590,7 @@ public class JdbcTest {
   }
 
   /** Tests sorting by an expression not in the '*' select clause. Test case for
-   * <a href="https://github.com/julianhyde/optiq/issues/176">issue #176</a>. */
+   * <a href="https://issues.apache.org/jira/browse/OPTIQ-176">OPTIQ-176</a>. */
   @Test public void testOrderStarByExpr() {
     OptiqAssert.that().with(OptiqAssert.Config.REGULAR)
         .query(
@@ -2727,7 +2775,9 @@ public class JdbcTest {
   }
 
   /** Limit implemented using {@link Queryable#take}. Test case for
-   * <a href="https://github.com/julianhyde/optiq/issues/96">issue #96</a>. */
+   * <a href="https://issues.apache.org/jira/browse/OPTIQ-96">OPTIQ-96</a>,
+   * "LIMIT against a table in a clone schema causes
+   * UnsupportedOperationException". */
   @Test public void testLimitOnQueryableTable() {
     OptiqAssert.that()
         .with(OptiqAssert.Config.FOODMART_CLONE)
@@ -2740,7 +2790,8 @@ public class JdbcTest {
   }
 
   /** Limit implemented using {@link Queryable#take}. Test case for
-   * <a href="https://github.com/julianhyde/optiq/issues/70">issue #70</a>. */
+   * <a href="https://issues.apache.org/jira/browse/OPTIQ-70">OPTIQ-70</a>,
+   * "Joins seem to be very expensive in memory". */
   @Test public void testSelfJoinCount() {
     OptiqAssert.that()
         .with(OptiqAssert.Config.JDBC_FOODMART)
@@ -3703,7 +3754,7 @@ public class JdbcTest {
   /** Tests windowed aggregation with no ORDER BY clause.
    *
    * <p>Test case for
-   * <a href="https://github.com/julianhyde/optiq/issues/285">issue #285</a>,
+   * <a href="https://issues.apache.org/jira/browse/OPTIQ-285">OPTIQ-285</a>,
    * "Window functions throw exception without ORDER BY".
    *
    * <p>Note:</p>
@@ -4000,6 +4051,29 @@ public class JdbcTest {
             "empid=110; deptno=10; name=Theodore; salary=11500.0; commission=250");
   }
 
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/OPTIQ-313">OPTIQ-313</a>,
+   * "Query decorrelation fails". */
+  @Test public void testJoinInCorrelatedSubquery() {
+    OptiqAssert.that()
+        .with(OptiqAssert.Config.REGULAR)
+        .query(
+            "select *\n"
+            + "from \"hr\".\"depts\" as d\n"
+            + "where \"deptno\" in (\n"
+            + "  select d2.\"deptno\"\n"
+            + "  from \"hr\".\"depts\" as d2\n"
+            + "  join \"hr\".\"emps\" as e2 using (\"deptno\")\n"
+            + "where d.\"deptno\" = d2.\"deptno\")")
+        .convertMatches(new Function1<RelNode, Void>() {
+          public Void apply(RelNode relNode) {
+            String s = RelOptUtil.toString(relNode);
+            assertThat(s, not(containsString("CorrelatorRel")));
+            return null;
+          }
+        });
+  }
+
   /** Tests a correlated scalar sub-query in the SELECT clause.
    *
    * <p>Note that there should be an extra row "empid=200; deptno=20;
@@ -4170,6 +4244,11 @@ public class JdbcTest {
                   .withSchema("POST")
                   .connect();
             }
+            if (name.equals("catchall")) {
+              return OptiqAssert.that()
+                  .with("s", new ReflectiveSchemaTest.CatchallSchema())
+                  .connect();
+            }
             throw new RuntimeException("unknown connection '" + name + "'");
           }
         });
@@ -4333,8 +4412,9 @@ public class JdbcTest {
   /** Tests a JSON model with a comment. Not standard JSON, but harmless to
    * allow Jackson's comments extension.
    *
-   * <p>Test case for <a href="https://github.com/julianhyde/optiq/issues/160">
-   *   optiq-160, "Allow comments in schema definitions"</a>.</p> */
+   * <p>Test case for
+   * <a href="https://issues.apache.org/jira/browse/OPTIQ-160">OPTIQ-160</a>,
+   * "Allow comments in schema definitions".</p> */
   @Test public void testModelWithComment() {
     final String model =
         FOODMART_MODEL.replace("schemas:", "/* comment */ schemas:");
@@ -4726,6 +4806,19 @@ public class JdbcTest {
             + "           className: '"
             + CountArgs2Function.class.getName()
             + "'\n"
+            + "         },\n"
+            + "         {\n"
+            + "           name: 'MY_ABS',\n"
+            + "           className: '"
+            + java.lang.Math.class.getName()
+            + "',\n"
+            + "           methodName: 'abs'\n"
+            + "         },\n"
+            + "         {\n"
+            + "           className: '"
+            + MultipleFunction.class.getName()
+            + "',\n"
+            + "           methodName: '*'\n"
             + "         }\n"
             + "       ]\n"
             + "     }\n"
@@ -4838,6 +4931,23 @@ public class JdbcTest {
     withBadUdf(AwkwardFunction.class)
         .connectThrows(
             "Declaring class 'net.hydromatic.optiq.test.JdbcTest$AwkwardFunction' of non-static user-defined function must have a public constructor with zero parameters");
+  }
+
+  /** Tests user-defined function, with multiple methods per class. */
+  @Test public void testUserDefinedFunctionWithMethodName() throws Exception {
+    // java.lang.Math has abs(int) and abs(double).
+    final OptiqAssert.AssertThat with = withUdf();
+    with.query("values abs(-4)").returnsValue("4");
+    with.query("values abs(-4.5)").returnsValue("4.5");
+
+    // 3 overloads of "fun1", another method "fun2", but method "nonStatic"
+    // cannot be used as a function
+    with.query("values \"adhoc\".\"fun1\"(2)").returnsValue("4");
+    with.query("values \"adhoc\".\"fun1\"(2, 3)").returnsValue("5");
+    with.query("values \"adhoc\".\"fun1\"('Foo Bar')").returnsValue("foo bar");
+    with.query("values \"adhoc\".\"fun2\"(10)").returnsValue("30");
+    with.query("values \"adhoc\".\"nonStatic\"(2)")
+        .throws_("No match found for function signature nonStatic(<NUMERIC>)");
   }
 
   /** Tests user-defined aggregate function. */
@@ -5311,7 +5421,7 @@ public class JdbcTest {
             "Cannot apply = to the two different charsets ISO-8859-1 and UTF-16LE");
 
     // The CONVERT function (what SQL:2011 calls "character transliteration") is
-    // not implemented yet. See https://github.com/julianhyde/optiq/issues/111.
+    // not implemented yet. See https://issues.apache.org/jira/browse/OPTIQ-111.
     with.query(
         "select * from \"employee\"\n"
         + "where convert(\"full_name\" using UTF16) = _UTF16'\u82f1\u56fd'")
@@ -6025,6 +6135,22 @@ public class JdbcTest {
     public int eval(int x) {
       return 0;
     }
+  }
+
+  /** UDF class that has multiple methods, some overloaded. */
+  public static class MultipleFunction {
+    private MultipleFunction() {}
+
+    // Three overloads
+    public static String fun1(String x) { return x.toLowerCase(); }
+    public static int fun1(int x) { return x * 2; }
+    public static int fun1(int x, int y) { return x + y; }
+
+    // Another method
+    public static int fun2(int x) { return x * 3; }
+
+    // Non-static method cannot be used because constructor is private
+    public int nonStatic(int x) { return x * 3; }
   }
 
   /** Example of a user-defined aggregate function (UDAF). */

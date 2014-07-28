@@ -73,6 +73,8 @@ public class RelDecorrelator implements ReflectiveVisitor {
   // The rel which is being visited
   private RelNode currentRel;
 
+  private final Context context;
+
   // maps built during decorrelation
   private final Map<RelNode, RelNode> mapOldToNewRel;
 
@@ -94,11 +96,13 @@ public class RelDecorrelator implements ReflectiveVisitor {
       RexBuilder rexBuilder,
       Map<RelNode, SortedSet<CorrelatorRel.Correlation>> mapRefRelToCorVar,
       SortedMap<CorrelatorRel.Correlation, CorrelatorRel> mapCorVarToCorRel,
-      Map<RexFieldAccess, CorrelatorRel.Correlation> mapFieldAccessToCorVar) {
+      Map<RexFieldAccess, CorrelatorRel.Correlation> mapFieldAccessToCorVar,
+      Context context) {
     this.rexBuilder = rexBuilder;
     this.mapRefRelToCorVar = mapRefRelToCorVar;
     this.mapCorVarToCorRel = mapCorVarToCorRel;
     this.mapFieldAccessToCorVar = mapFieldAccessToCorVar;
+    this.context = context;
 
     decorrelateVisitor = new DecorrelateRelVisitor();
     mapOldToNewRel = new HashMap<RelNode, RelNode>();
@@ -116,6 +120,7 @@ public class RelDecorrelator implements ReflectiveVisitor {
     HepProgram program = HepProgram.builder()
         .addRuleInstance(new AdjustProjectForCountAggregateRule(false))
         .addRuleInstance(new AdjustProjectForCountAggregateRule(true))
+        .addRuleInstance(PushFilterPastJoinRule.FILTER_ON_JOIN)
         .build();
 
     HepPlanner planner = createPlanner(program);
@@ -169,6 +174,7 @@ public class RelDecorrelator implements ReflectiveVisitor {
     // node is copied when it is registered.
     return new HepPlanner(
         program,
+        context,
         true,
         createCopyHook(),
         RelOptCostImpl.FACTORY);
@@ -179,7 +185,6 @@ public class RelDecorrelator implements ReflectiveVisitor {
         .addRuleInstance(new RemoveSingleAggregateRule())
         .addRuleInstance(new RemoveCorrelationForScalarProjectRule())
         .addRuleInstance(new RemoveCorrelationForScalarAggregateRule())
-        .addRuleInstance(PushFilterPastJoinRule.FILTER_ON_JOIN)
         .build();
 
     HepPlanner planner = createPlanner(program);
@@ -491,7 +496,7 @@ public class RelDecorrelator implements ReflectiveVisitor {
     mapNewRelToMapOldToNewOutputPos.put(newAggregateRel, combinedMap);
 
     if (produceCorVar) {
-      // AggregaterRel does not change input ordering so corVars will be
+      // AggregateRel does not change input ordering so corVars will be
       // located at the same position as the input newProjectRel.
       mapNewRelToMapCorVarToOutputPos.put(
           newAggregateRel,
@@ -1631,14 +1636,15 @@ public class RelDecorrelator implements ReflectiveVisitor {
           }
         }
 
+        final RelDataType newType;
         if (!isSpecialCast) {
           // TODO: ideally this only needs to be called if the result
           // type will also change. However, since that requires
-          // suport from type inference rules to tell whether a rule
+          // support from type inference rules to tell whether a rule
           // decides return type based on input types, for now all
           // operators will be recreated with new type if any operand
           // changed, unless the operator has "built-in" type.
-          newCall = rexBuilder.makeCall(operator, clonedOperands);
+          newType = rexBuilder.deriveReturnType(operator, clonedOperands);
         } else {
           // Use the current return type when creating a new call, for
           // operators with return type built into the operator
@@ -1646,14 +1652,15 @@ public class RelDecorrelator implements ReflectiveVisitor {
           // cast function with less than 2 operands.
 
           // TODO: Comments in RexShuttle.visitCall() mention other
-          // types in this catagory. Need to resolve those together
-          // and preferrably in the base class RexShuttle.
-          newCall =
-              rexBuilder.makeCall(
-                  call.getType(),
-                  operator,
-                  clonedOperands);
+          // types in this category. Need to resolve those together
+          // and preferably in the base class RexShuttle.
+          newType = call.getType();
         }
+        newCall =
+            rexBuilder.makeCall(
+                newType,
+                operator,
+                clonedOperands);
       } else {
         newCall = call;
       }
